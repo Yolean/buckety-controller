@@ -10,11 +10,17 @@
 # Inputs (env):
 #   IMPLEMENTATIONS    Comma-separated. Default: redpanda,versitygw,minio.
 #                      Each maps via $IMPL_DRIVER below to a driver.
-#   OCI_DIR            Local OCI layout (preferred over CONTROLLER_IMAGE
-#                      when both are set). Sideloaded via
-#                      `y-cluster images load`.
-#   CONTROLLER_IMAGE   Image reference (e.g. ghcr.io/...@sha256:...).
-#                      Used when OCI_DIR is not set.
+#   CONTROLLER_IMAGE   Cluster-side image reference the deployment is
+#                      patched to before rollout. Required.
+#   OCI_DIR            Optional local OCI layout to push before applying.
+#                      Requires PUSH_AS.
+#   PUSH_AS            Host-reachable registry target for OCI_DIR
+#                      (e.g. localhost:5000/yolean/buckety-controller:dev).
+#                      The cluster-side equivalent goes in CONTROLLER_IMAGE;
+#                      they differ when push and pull traverse different
+#                      hostnames (k3d local registry on a docker network
+#                      reaches as k3d-<name>:5000 from inside the cluster
+#                      but as localhost:<port> from the host).
 #   KEEP_FAILED        If true, scenario namespaces are kept on failure
 #                      for `kubectl describe` / `kubectl logs`.
 #   KUBECONFIG         Cluster the harness writes to.
@@ -62,15 +68,13 @@ fail() { printf '[run.sh][ERR] %s\n' "$*" >&2; exit 1; }
 sideload_image() {
   if [[ -n "${OCI_DIR:-}" ]]; then
     [[ -d "$OCI_DIR" ]] || fail "OCI_DIR=$OCI_DIR not a directory"
-    log "sideloading $OCI_DIR via y-cluster images load"
-    y-cluster images load "$OCI_DIR"
-    return
+    [[ -n "${PUSH_AS:-}" ]] || fail "OCI_DIR set but PUSH_AS unset"
+    command -v crane >/dev/null || fail "crane not on PATH"
+    log "pushing $OCI_DIR -> $PUSH_AS"
+    crane push --insecure "$OCI_DIR" "$PUSH_AS"
   fi
-  if [[ -n "${CONTROLLER_IMAGE:-}" ]]; then
-    log "using CONTROLLER_IMAGE=$CONTROLLER_IMAGE (no sideload)"
-    return
-  fi
-  fail "set OCI_DIR (sideloaded local build) or CONTROLLER_IMAGE (pre-pushed digest)"
+  [[ -n "${CONTROLLER_IMAGE:-}" ]] || fail "CONTROLLER_IMAGE required (cluster-side image ref)"
+  log "controller image: $CONTROLLER_IMAGE"
 }
 
 # ---- per-implementation lifecycle ----------------------------
@@ -81,7 +85,41 @@ apply_overlay() {
   [[ -d "$overlay" ]] || fail "overlay missing for implementation '$impl': $overlay"
   log "applying overlay $overlay"
   kubectl apply -k "$overlay"
-  kubectl -n "$CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
+  ensure_webhook_tls
+  # Overlays ship the baked-in default image; CI and local k3d both push
+  # to a per-run registry, so patch the deployment to CONTROLLER_IMAGE
+  # before rollout instead of carrying a stale tag.
+  kubectl -n "$CONTROLLER_NS" set image deploy/buckety-controller \
+    controller="$CONTROLLER_IMAGE"
+  kubectl -n "$CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=180s
+}
+
+# The base overlay ships a ValidatingWebhookConfiguration that
+# expects cert-manager to populate caBundle. In e2e there is no
+# cert-manager, so generate a one-shot self-signed cert, mount it
+# into the controller, and patch the VWC's caBundle to trust it.
+# parameter-mutation and similar scenarios actively probe the
+# webhook so disabling it via --enable-webhook=false would mask
+# real regressions.
+WEBHOOK_TLS_DIR=""
+ensure_webhook_tls() {
+  if [[ -z "$WEBHOOK_TLS_DIR" ]]; then
+    command -v openssl >/dev/null || fail "openssl required for self-signed webhook TLS"
+    log "generating self-signed webhook TLS"
+    WEBHOOK_TLS_DIR="$(mktemp -d)"
+    openssl req -x509 -newkey rsa:2048 -days 365 -nodes \
+      -keyout "$WEBHOOK_TLS_DIR/tls.key" -out "$WEBHOOK_TLS_DIR/tls.crt" \
+      -subj "/CN=buckety-controller-webhook.${CONTROLLER_NS}.svc" \
+      -addext "subjectAltName=DNS:buckety-controller-webhook.${CONTROLLER_NS}.svc,DNS:buckety-controller-webhook.${CONTROLLER_NS}.svc.cluster.local" \
+      >/dev/null 2>&1
+  fi
+  kubectl -n "$CONTROLLER_NS" create secret tls buckety-controller-webhook-tls \
+    --cert="$WEBHOOK_TLS_DIR/tls.crt" --key="$WEBHOOK_TLS_DIR/tls.key" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  local ca_bundle
+  ca_bundle="$(base64 -w0 <"$WEBHOOK_TLS_DIR/tls.crt")"
+  kubectl patch validatingwebhookconfiguration buckety-controller --type=json \
+    -p="[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${ca_bundle}\"}]"
 }
 
 teardown_overlay() {

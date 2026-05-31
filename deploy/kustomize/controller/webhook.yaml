@@ -3,9 +3,14 @@ kind: ValidatingWebhookConfiguration
 metadata:
   name: buckety-controller
   annotations:
-    # cert-manager wires the CA bundle in via overlay; the base
-    # leaves caBundle empty so plain `kustomize build` works.
-    cert-manager.io/inject-ca-from-secret: buckety/buckety-controller-webhook-tls
+    # cert-manager populates caBundle from the named Certificate's
+    # auto-managed Secret. The base leaves caBundle empty so plain
+    # `kustomize build` works. Convention: platforms create a
+    # Certificate named "buckety-controller-webhook" in the
+    # controller's namespace with secretName
+    # "buckety-controller-webhook-tls". The Deployment mounts that
+    # Secret at /var/run/buckety/webhook-tls.
+    cert-manager.io/inject-ca-from: buckety/buckety-controller-webhook
 webhooks:
 - name: validate.buckety.yolean.se
   admissionReviewVersions: [v1]

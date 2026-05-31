@@ -30,7 +30,7 @@ bootstrap="$(secret_value cfg-mut-topic bootstrap)"
 broker_retention="$(kcg run -n "${E2E_KAFKA_NAMESPACE:-redpanda}" --rm -i --restart=Never --quiet \
   --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
   "rpk-cfgcheck-$RANDOM" -- \
-  rpk topic describe -p "$topic_name" --brokers "$bootstrap" 2>/dev/null \
+  topic describe -c "$topic_name" --brokers "$bootstrap" 2>/dev/null \
   | awk '/retention.ms/ {print $2}')"
 [[ "$broker_retention" == "3600000" ]] \
   || fail "broker retention.ms=$broker_retention, expected 3600000"

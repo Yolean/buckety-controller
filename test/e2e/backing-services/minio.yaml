@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-server
+  namespace: blobs
+type: Opaque
+stringData:
+  root-user: e2e-minio-root
+  root-password: e2e-minio-root-password-do-not-use-in-prod
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-server
+  namespace: buckety
+type: Opaque
+stringData:
+  root-user: e2e-minio-root
+  root-password: e2e-minio-root-password-do-not-use-in-prod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: blobs
+spec:
+  selector:
+    app: minio
+  ports:
+  - port: 9000
+    targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: blobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-server
+              key: root-user
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-server
+              key: root-password
+        args:
+        - server
+        - /data
+        - --address=:9000
+        ports:
+        - containerPort: 9000
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: 9000
+          initialDelaySeconds: 3
+          periodSeconds: 3
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}

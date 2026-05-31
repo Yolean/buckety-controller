@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: versitygw-server
+  namespace: blobs
+type: Opaque
+stringData:
+  root-accesskey: e2e-versitygw-root
+  root-secretkey: e2e-versitygw-secret-do-not-use-in-prod
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: versitygw-server
+  namespace: buckety
+type: Opaque
+stringData:
+  root-accesskey: e2e-versitygw-root
+  root-secretkey: e2e-versitygw-secret-do-not-use-in-prod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: versitygw
+  namespace: blobs
+spec:
+  selector:
+    app: versitygw
+  ports:
+  - port: 9000
+    targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: versitygw
+  namespace: blobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: versitygw
+  template:
+    metadata:
+      labels:
+        app: versitygw
+    spec:
+      containers:
+      - name: versitygw
+        image: docker.io/versity/versitygw:v1.4.1
+        env:
+        - name: ROOT_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: versitygw-server
+              key: root-accesskey
+        - name: ROOT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: versitygw-server
+              key: root-secretkey
+        - name: VGW_BACKEND
+          value: posix
+        - name: VGW_ARGS
+          value: --port :9000
+        - name: VGW_BACKEND_ARG
+          value: /data
+        ports:
+        - containerPort: 9000
+        readinessProbe:
+          tcpSocket:
+            port: 9000
+          initialDelaySeconds: 3
+          periodSeconds: 3
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}

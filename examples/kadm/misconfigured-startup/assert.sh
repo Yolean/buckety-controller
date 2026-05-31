@@ -37,18 +37,24 @@ while read -r variant regex; do
   log "applying broken config: $variant (expect regex: /$regex/)"
   apply_broken "$file"
 
-  # Wait until a pod has terminated at least once with non-zero
-  # exit (or the rollout is failing). We allow up to 60s.
-  deadline=$(( $(date +%s) + 60 ))
+  # Wait until ANY pod's logs (current or previous container)
+  # carry the expected regex. During a rollout there can be two
+  # pods (old + new); after the new one has crashed once it lands
+  # in CrashLoopBackOff and the message is in either log stream.
+  deadline=$(( $(date +%s) + 90 ))
   matched=0
   while (( $(date +%s) < deadline )); do
-    pod="$(kcg -n "$E2E_CONTROLLER_NS" get pods \
+    pods=$(kcg -n "$E2E_CONTROLLER_NS" get pods \
       -l app.kubernetes.io/name=buckety-controller \
-      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-    if [[ -n "$pod" ]] && kcg -n "$E2E_CONTROLLER_NS" logs "$pod" --previous 2>/dev/null \
-        | grep -E "$regex" >/dev/null 2>&1; then
-      matched=1; break
-    fi
+      -o jsonpath='{range .items[*]}{.metadata.name} {end}' 2>/dev/null || true)
+    for pod in $pods; do
+      for arg in "" "--previous"; do
+        if kcg -n "$E2E_CONTROLLER_NS" logs "$pod" $arg 2>/dev/null \
+            | grep -E "$regex" >/dev/null 2>&1; then
+          matched=1; break 3
+        fi
+      done
+    done
     sleep 2
   done
 

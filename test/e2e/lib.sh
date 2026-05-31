@@ -78,10 +78,12 @@ kafka_topic_exists() {
   local kns="${2:-${E2E_KAFKA_NAMESPACE:-redpanda}}"
   local bootstrap="${3:-${E2E_KAFKA_BOOTSTRAP:-redpanda.${kns}.svc.cluster.local:9093}}"
   log "verifying Kafka topic '$topic' on $bootstrap"
+  # ghcr.io/yolean/redpanda's ENTRYPOINT is rpk; pass args
+  # without the leading `rpk` to avoid `rpk rpk topic ...`.
   if ! kcg run -n "$kns" --rm -i --restart=Never --quiet \
       --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
       "rpk-check-$RANDOM" -- \
-      rpk topic list --brokers "$bootstrap" 2>/dev/null | grep -qE "^\s*$topic\s"; then
+      topic list --brokers "$bootstrap" 2>/dev/null | grep -qE "^\s*$topic\s"; then
     fail "Kafka topic '$topic' not found on $bootstrap"
   fi
 }

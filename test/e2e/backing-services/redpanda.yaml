@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  namespace: redpanda
+spec:
+  clusterIP: None
+  ports:
+  - name: kafka
+    port: 9093
+    targetPort: 9093
+  - name: rpc
+    port: 33145
+    targetPort: 33145
+  - name: admin
+    port: 9644
+    targetPort: 9644
+  selector:
+    app: redpanda
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redpanda
+  namespace: redpanda
+spec:
+  serviceName: redpanda
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redpanda
+  template:
+    metadata:
+      labels:
+        app: redpanda
+    spec:
+      containers:
+      - name: redpanda
+        image: docker.io/redpandadata/redpanda:v26.1.9
+        args:
+        - redpanda
+        - start
+        - --mode=dev-container
+        - --smp=1
+        - --memory=512M
+        - --reserve-memory=0M
+        - --check=false
+        - --node-id=0
+        - --kafka-addr=PLAINTEXT://0.0.0.0:9093
+        - --advertise-kafka-addr=PLAINTEXT://redpanda.redpanda.svc.cluster.local:9093
+        - --rpc-addr=0.0.0.0:33145
+        - --advertise-rpc-addr=redpanda-0.redpanda.redpanda.svc.cluster.local:33145
+        ports:
+        - name: kafka
+          containerPort: 9093
+        - name: rpc
+          containerPort: 33145
+        - name: admin
+          containerPort: 9644
+        readinessProbe:
+          httpGet:
+            path: /v1/status/ready
+            port: 9644
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 30
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/redpanda/data
+      volumes:
+      - name: data
+        emptyDir: {}

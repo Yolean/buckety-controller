@@ -74,14 +74,24 @@ versioning.
 
 ## Webhook TLS
 
-cert-manager. The kustomize base annotates the
+cert-manager when present; webhook-disabled mode for platforms
+without it. The kustomize base annotates the
 `ValidatingWebhookConfiguration` with
-`cert-manager.io/inject-ca-from-secret: buckety/buckety-controller-webhook-tls`;
-the overlay (or release base) creates a `Certificate` whose
-secret is `buckety-controller-webhook-tls`. Self-signed
-fallback is not in v1alpha1; the deploy-time guidance is
-"cert-manager is a prerequisite". This matches what ystack
-already deploys cluster-wide.
+`cert-manager.io/inject-ca-from: buckety/buckety-controller-webhook`;
+overlays that include `deploy/kustomize/controller/webhook.yaml`
+must create a `Certificate` named `buckety-controller-webhook`
+in the controller namespace with secretName
+`buckety-controller-webhook-tls`.
+
+Platforms without cert-manager (ystack at the time of this
+writing is one) drop `webhook.yaml` from the overlay AND pass
+`--enable-webhook=false` to the controller binary. The manager
+starts and the reconcilers run; per-driver parameter validation
+moves from admission to the reconcile loop and surfaces on
+`Buckety.status.conditions` instead of failing the apply. CRD
+CEL still enforces spec.backend / spec.name / bucketyRef /
+credentialsSecretName immutability and the role/retentionPolicy
+enums regardless.
 
 ## Re-check cadence
 

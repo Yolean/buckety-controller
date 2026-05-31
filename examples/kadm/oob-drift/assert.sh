@@ -13,14 +13,14 @@ log "out-of-band: setting retention.ms=1 directly on broker"
 kcg run -n "${E2E_KAFKA_NAMESPACE:-redpanda}" --rm -i --restart=Never --quiet \
   --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
   "rpk-oob-set-$RANDOM" -- \
-  rpk topic alter-config "$topic_name" --set retention.ms=1 --brokers "$bootstrap"
+  topic alter-config "$topic_name" --set retention.ms=1 --brokers "$bootstrap"
 
 log "expecting controller to reconcile retention.ms back to 3600000"
 for _ in $(seq 1 60); do
   current="$(kcg run -n "${E2E_KAFKA_NAMESPACE:-redpanda}" --rm -i --restart=Never --quiet \
     --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
     "rpk-oob-check-$RANDOM" -- \
-    rpk topic describe -p "$topic_name" --brokers "$bootstrap" 2>/dev/null \
+    topic describe -c "$topic_name" --brokers "$bootstrap" 2>/dev/null \
     | awk '/retention.ms/ {print $2}')"
   [[ "$current" == "3600000" ]] && break
   sleep 5
