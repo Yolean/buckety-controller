@@ -1,0 +1,25 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: buckety-controller
+  annotations:
+    # cert-manager wires the CA bundle in via overlay; the base
+    # leaves caBundle empty so plain `kustomize build` works.
+    cert-manager.io/inject-ca-from-secret: buckety/buckety-controller-webhook-tls
+webhooks:
+- name: validate.buckety.yolean.se
+  admissionReviewVersions: [v1]
+  sideEffects: None
+  failurePolicy: Fail
+  timeoutSeconds: 10
+  rules:
+  - apiGroups: [buckety.yolean.se]
+    apiVersions: [v1alpha1]
+    operations: [CREATE, UPDATE]
+    resources: [bucketies, bucketyaccesses]
+  clientConfig:
+    service:
+      name: buckety-controller-webhook
+      namespace: buckety
+      path: /validate
+      port: 443

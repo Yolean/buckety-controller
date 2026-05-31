@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Namespace is set by the harness via `kubectl apply -n <ns>`;
+# omitted here so the same YAML works against any e2e namespace.
+resources:
+- buckety.yaml
+- consumer-job.yaml

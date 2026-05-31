@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: orders-roundtrip
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: roundtrip
+        image: ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538
+        env:
+        - name: KAFKA_BOOTSTRAP
+          valueFrom:
+            secretKeyRef:
+              name: orders-topic
+              key: bootstrap
+        - name: KAFKA_TOPIC
+          valueFrom:
+            secretKeyRef:
+              name: orders-topic
+              key: topic
+        command: [sh, -ec]
+        args:
+        - |
+          set -e
+          echo "produce -> $KAFKA_TOPIC on $KAFKA_BOOTSTRAP"
+          echo "hello-buckety" | rpk topic produce "$KAFKA_TOPIC" --brokers "$KAFKA_BOOTSTRAP"
+          echo "consume <- $KAFKA_TOPIC"
+          rpk topic consume "$KAFKA_TOPIC" --brokers "$KAFKA_BOOTSTRAP" --num 1 --offset start

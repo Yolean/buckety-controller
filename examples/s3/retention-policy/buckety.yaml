@@ -1,0 +1,21 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: keep-me
+spec:
+  backend: s3
+  retentionPolicy: Retain
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: keep-me-bucket
+---
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: drop-me
+spec:
+  backend: s3
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: drop-me-bucket

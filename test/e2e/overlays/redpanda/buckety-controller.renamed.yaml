@@ -1,0 +1,14 @@
+# Same connection details as buckety-controller.yaml but with the
+# backend name changed from 'kafka' to 'kafka-renamed'. Used by the
+# kadm/backend-stickiness scenario to prove status.backend stickiness
+# survives a config rename.
+backends:
+
+- name: kafka-renamed
+  driver: kadm
+  config:
+    seedBrokers:
+    - redpanda.redpanda.svc.cluster.local:9093
+    clientID: buckety-controller-e2e
+  defaults:
+    zone: e2e

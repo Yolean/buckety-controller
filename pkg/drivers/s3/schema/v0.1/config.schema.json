@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "s3 driver backend config",
+  "description": "Schema for the config: block under a backend entry whose driver is s3. Covers all S3-compatible implementations (aws, r2, minio, versitygw, ...).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["endpoint", "accessKeyID", "secretAccessKey"],
+  "properties": {
+    "implementation": {
+      "type": "string",
+      "enum": ["aws", "r2", "minio", "versitygw"],
+      "description": "Optional discriminator. When set, gates implementation-specific Buckety parameters. With implementation: r2, Bucketys against this backend may set spec.parameters.jurisdiction (eu for EU-resident data; omit for the global default). See parameters.schema.json. Omit implementation to disable capability gating (only common-shape parameters work)."
+    },
+    "endpoint": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Service URL. For R2: https://<account>.r2.cloudflarestorage.com (or https://<jurisdiction-id>.r2.cloudflarestorage.com for a jurisdictional endpoint). For in-cluster: http://y-s3-api.blobs.svc.cluster.local:9000."
+    },
+    "region": {
+      "type": "string",
+      "description": "AWS-style region. Use 'auto' for R2 (R2 uses spec.parameters.jurisdiction for data residency, not region), 'us-east-1' for MinIO/VersityGW unless configured otherwise."
+    },
+    "forcePathStyle": {
+      "type": "boolean",
+      "default": false,
+      "description": "Use path-style addressing instead of virtual-hosted-style. Required by some in-cluster S3 implementations."
+    },
+    "accessKeyID": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Backend root access key. envsubst:\"true\" - supports ${VAR} interpolation at controller startup."
+    },
+    "secretAccessKey": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Backend root secret key. envsubst:\"true\" - supports ${VAR} interpolation at controller startup."
+    }
+  }
+}

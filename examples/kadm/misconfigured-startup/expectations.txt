@@ -1,0 +1,6 @@
+# <variant-filename> <regex>
+strict-decode.yaml      unknown field "seedBroker"
+undefined-var.yaml      undefined variable "BUCKETY_E2E_UNSET_VAR"
+unknown-driver.yaml     unknown driver "badname"
+duplicate-names.yaml    duplicate backend name "kafka"
+missing-required.yaml   missing required field "seedBrokers"

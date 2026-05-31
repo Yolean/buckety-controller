@@ -1,0 +1,25 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: keep-me
+spec:
+  backend: kafka
+  parameters:
+    partitions: "1"
+  retentionPolicy: Retain
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: keep-me-topic
+---
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: drop-me
+spec:
+  backend: kafka
+  parameters:
+    partitions: "1"
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: drop-me-topic

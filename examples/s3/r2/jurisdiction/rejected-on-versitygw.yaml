@@ -1,0 +1,9 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: eu-data-wrong-impl
+spec:
+  backend: s3
+  parameters:
+    jurisdiction: "eu"
+  retentionPolicy: Retain

@@ -1,0 +1,9 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: orders-explicit
+spec:
+  bucketyRef:
+    name: orders
+  credentialsSecretName: explicit-secret
+  role: ReadWrite

@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dial-tone-roundtrip
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: roundtrip
+        image: ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538
+        env:
+        - name: KAFKA_BOOTSTRAP
+          valueFrom:
+            secretKeyRef:
+              name: dial-tone-topic
+              key: bootstrap
+        - name: KAFKA_TOPIC
+          valueFrom:
+            secretKeyRef:
+              name: dial-tone-topic
+              key: topic
+        command: [sh, -ec]
+        args:
+        - |
+          set -e
+          echo "operator-down test: produce -> $KAFKA_TOPIC"
+          echo "hello-from-the-dark" | rpk topic produce "$KAFKA_TOPIC" --brokers "$KAFKA_BOOTSTRAP"
+          rpk topic consume "$KAFKA_TOPIC" --brokers "$KAFKA_BOOTSTRAP" --num 1 --offset start

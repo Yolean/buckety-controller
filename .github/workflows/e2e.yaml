@@ -1,0 +1,95 @@
+# Buckety controller e2e.
+#
+# Per SPEC.md §E2E harness #5, this workflow is a thin wrapper:
+# it does not know about scenarios. If a scenario is added under
+# examples/, this file does not change. Anything else that would
+# normally go here lives in test/e2e/run.sh and is identical
+# locally and in CI.
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+    - name: Install y-cluster tooling
+      run: |
+        # y-cluster bin scripts are vendored into this repo's
+        # devcontainer in a follow-up; for now, fetch the release
+        # artefacts. The exact command lives in y-cluster's README.
+        echo "TODO: install y-cluster + kustomize + kubectl + k3d"
+        # The impl branch wires this up.
+        exit 0
+
+    # k3d is the only provisioner that works in GHA; kind, minikube,
+    # multipass and the bridged-NAT provisioners all conflict with
+    # the runner's network/userns posture. Reuse the y-cluster k3d
+    # shape contributors run locally so the harness sits on identical
+    # cluster topology in both callers.
+    - name: Start k3d cluster
+      run: |
+        # k3d cluster create e2e --image rancher/k3s:vX.Y.Z-k3s1
+        # y-cluster kubeconfig e2e ~/.kube/config
+        echo "TODO: y-cluster k3d provisioning"
+        exit 0
+
+    - name: Sideload backing services (Redpanda, VersityGW, MinIO)
+      run: |
+        # Apply pre-baked manifests for the three backing services
+        # under their conventional namespaces (redpanda/, blobs/).
+        # These are not part of buckety-controller; they live in
+        # ystack and are sideloaded with their pre-built images.
+        echo "TODO: kubectl apply -k ystack/redpanda/e2e + ystack/blobs-versitygw/e2e + ystack/blobs-minio/e2e"
+        exit 0
+
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      with:
+        go-version: stable
+
+    - name: Build controller image (contain)
+      run: |
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+          -trimpath \
+          -ldflags "-s -w -X main.version=$(git describe --always --dirty)" \
+          -o target/linux/amd64/buckety \
+          ./cmd/buckety
+        IMAGE=ghcr.io/yolean/buckety-controller:${{ github.sha }} \
+          contain build --output ./oci --push=false
+      # In phase 1 there is no Go code under cmd/buckety; this
+      # step will fail. That's expected per the PR description.
+
+    - name: Run e2e harness
+      env:
+        IMPLEMENTATIONS: redpanda,versitygw,minio
+        OCI_DIR: ./oci
+      run: ./test/e2e/run.sh
+
+    - name: Surface controller logs on failure
+      if: failure()
+      run: |
+        kubectl -n buckety logs deploy/buckety-controller --tail=500 || true
+        kubectl -n buckety describe deploy/buckety-controller || true
+
+  # The image push job runs only on main branch builds with a
+  # successful e2e; it pins by digest into deploy/kustomize/release/
+  # so consumers vendor a self-consistent base. Stubbed for phase 1.
+  publish:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: e2e
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - run: echo "TODO: contain build --push --image ghcr.io/yolean/buckety-controller@..."
+    - run: echo "TODO: template deploy/kustomize/release/ with the pushed digest, commit back"

@@ -1,0 +1,6 @@
+backends:
+- name: kafka
+  driver: badname
+  config:
+    seedBrokers:
+    - redpanda.redpanda.svc.cluster.local:9093

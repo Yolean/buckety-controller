@@ -1,0 +1,7 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: shared
+spec:
+  backend: s3
+  retentionPolicy: Delete

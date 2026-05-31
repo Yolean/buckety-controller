@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "s3 driver Buckety parameters",
+  "description": "Schema for Buckety.spec.parameters when the resolved driver is s3. v1alpha1 has no common-shape parameters; capability-gated parameters are honoured only when the backend declares the matching implementation discriminator.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "jurisdiction": {
+      "type": "string",
+      "enum": ["eu"],
+      "description": "Cloudflare R2 data jurisdiction. Capability-gated: accepted only when the backend's config declares implementation: r2; admission rejects on any other implementation. Set at bucket creation, immutable post-create."
+    }
+  }
+}

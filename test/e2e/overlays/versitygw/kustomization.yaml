@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: buckety
+resources:
+- ../../../../deploy/kustomize/base
+secretGenerator:
+- name: buckety-controller-config
+  files:
+  - buckety-controller.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+patches:
+- path: deployment-env.yaml
+  target:
+    kind: Deployment
+    name: buckety-controller

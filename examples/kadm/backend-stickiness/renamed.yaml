@@ -1,0 +1,12 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: sticky-new
+spec:
+  backend: kafka-renamed
+  parameters:
+    partitions: "1"
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: sticky-new-topic

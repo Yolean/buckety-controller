@@ -1,0 +1,14 @@
+# Controller config for e2e against Redpanda.
+# Backing service is sideloaded by the GHA prelude / by
+# y-cluster-local-image-builds locally; expected at
+# redpanda.redpanda.svc.cluster.local:9093.
+backends:
+
+- name: kafka
+  driver: kadm
+  config:
+    seedBrokers:
+    - redpanda.redpanda.svc.cluster.local:9093
+    clientID: buckety-controller-e2e
+  defaults:
+    zone: e2e

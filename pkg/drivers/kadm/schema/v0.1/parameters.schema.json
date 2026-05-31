@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "kadm driver Buckety parameters",
+  "description": "Schema for Buckety.spec.parameters when the resolved driver is kadm. Driver-known keys are listed under properties; pass-through Kafka topic configs match patternProperties.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "partitions": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$",
+      "description": "Partition count. Omit to use broker default (CreateTopics replication=-1 + broker default). Can grow but not shrink; an attempted shrink surfaces ParameterDrift."
+    },
+    "replicationFactor": {
+      "type": "string",
+      "pattern": "^-?[1-9][0-9]*$",
+      "description": "Replication factor. Omit (or set -1) to use broker default.replication.factor."
+    }
+  },
+  "patternProperties": {
+    "^config\\.[a-z][a-z0-9._]*$": {
+      "type": "string",
+      "description": "Pass-through Kafka topic config (e.g. config.retention.ms, config.cleanup.policy, config.compression.type). Backend's own validation catches typos. Drivers document which keys are immutable broker-side."
+    }
+  }
+}

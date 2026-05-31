@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: orders-roundtrip
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: roundtrip
+        image: public.ecr.aws/aws-cli/aws-cli:latest
+        env:
+        - name: AWS_ENDPOINT_URL
+          valueFrom: { secretKeyRef: { name: orders-bucket, key: endpoint } }
+        - name: BUCKETY_BUCKET
+          valueFrom: { secretKeyRef: { name: orders-bucket, key: bucket } }
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom: { secretKeyRef: { name: orders-bucket, key: accessKeyID } }
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom: { secretKeyRef: { name: orders-bucket, key: secretAccessKey } }
+        - name: AWS_REGION
+          value: "us-east-1"
+        command: [sh, -ec]
+        args:
+        - |
+          set -e
+          echo "hello-buckety" > /tmp/object.txt
+          aws s3 cp /tmp/object.txt "s3://$BUCKETY_BUCKET/probe.txt"
+          aws s3 cp "s3://$BUCKETY_BUCKET/probe.txt" /tmp/back.txt
+          diff /tmp/object.txt /tmp/back.txt

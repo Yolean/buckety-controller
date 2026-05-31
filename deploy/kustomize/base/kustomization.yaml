@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Composite base: CRDs + controller. Most consumers apply this.
+# If your platform installs CRDs separately (common when CRDs
+# are managed by a different controller or pinned to a slower
+# upgrade cadence), apply ../crd/ and ../controller/
+# independently and skip this composite.
+resources:
+- ../crd
+- ../controller

@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "kadm driver backend config",
+  "description": "Schema for the config: block under a backend entry whose driver is kadm.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["seedBrokers"],
+  "properties": {
+    "seedBrokers": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1,
+      "description": "Bootstrap broker addresses (host:port)."
+    },
+    "clientID": {
+      "type": "string",
+      "description": "Client ID advertised to the broker. Omit to use the driver's compiled-in default."
+    }
+  }
+}

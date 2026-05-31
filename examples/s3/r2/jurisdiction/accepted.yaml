@@ -1,0 +1,9 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: eu-data
+spec:
+  backend: r2-fake
+  parameters:
+    jurisdiction: "eu"
+  retentionPolicy: Retain

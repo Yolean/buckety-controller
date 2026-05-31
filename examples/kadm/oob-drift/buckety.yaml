@@ -1,0 +1,13 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: drift
+spec:
+  backend: kafka
+  parameters:
+    partitions: "3"
+    config.retention.ms: "3600000"
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: drift-topic

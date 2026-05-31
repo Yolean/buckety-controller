@@ -1,0 +1,12 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: dial-tone
+spec:
+  backend: kafka
+  parameters:
+    partitions: "1"
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: dial-tone-topic

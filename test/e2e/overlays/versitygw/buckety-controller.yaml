@@ -1,0 +1,30 @@
+# Controller config for e2e against VersityGW.
+# Backing service is sideloaded by the GHA prelude / locally;
+# expected at versitygw.blobs.svc.cluster.local:9000.
+# Root keys come in via ${VERSITYGW_ROOT_ACCESSKEY} /
+# ${VERSITYGW_ROOT_SECRETKEY}; see deployment-env.yaml.
+backends:
+
+- name: s3
+  driver: s3
+  config:
+    implementation: versitygw
+    endpoint: http://versitygw.blobs.svc.cluster.local:9000
+    region: us-east-1
+    forcePathStyle: true
+    accessKeyID:     ${VERSITYGW_ROOT_ACCESSKEY}
+    secretAccessKey: ${VERSITYGW_ROOT_SECRETKEY}
+  defaults:
+    zone: e2e
+
+# Fake R2 backend used by examples/s3/r2/jurisdiction/. Reachability
+# is irrelevant - admission decisions read the implementation
+# discriminator at controller startup.
+- name: r2-fake
+  driver: s3
+  config:
+    implementation: r2
+    endpoint: https://example.invalid
+    region: auto
+    accessKeyID: not-used
+    secretAccessKey: not-used

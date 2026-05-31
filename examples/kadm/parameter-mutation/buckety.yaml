@@ -1,0 +1,13 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: cfg-mut
+spec:
+  backend: kafka
+  parameters:
+    partitions: "3"
+    config.retention.ms: "604800000"
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: cfg-mut-topic

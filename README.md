@@ -90,6 +90,12 @@ with the image already pinned by digest — the same digest the
 GHA workflow pushed to `ghcr.io/yolean/buckety-controller`. The
 build is reproducible: image and base ship together.
 
+> **Pre-v0.1.0 installs.** Until the first tagged release,
+> `deploy/kustomize/release/` does not exist. Vendor from
+> `deploy/kustomize/base/` instead and pin the image yourself
+> via your overlay's `images:` field. Migrate to the release
+> base when v0.1.0 ships.
+
 Vendor the release base into your platform repo:
 
 ```text
@@ -280,6 +286,17 @@ Secret names, or remove `defaultAccess` in one apply and add the
 explicit `BucketyAccess` in a second apply, if zero-gap matters.
 See [`SPEC.md`](./SPEC.md#implicit-access-defaultaccess) for the
 full lifecycle.
+
+> **`role` is advisory in v1alpha1.** `BucketyAccess.spec.role`
+> accepts `Reader`, `Writer`, or `ReadWrite`, but the v1alpha1
+> kadm and s3 drivers do not yet scope credentials per role.
+> Every Secret minted for the same `Buckety` carries identical
+> root credentials regardless of `role`. The controller surfaces
+> a `ScopingNotImplemented=True` condition on each affected
+> `BucketyAccess` (visible via `kubectl describe bucketyaccess`)
+> so the gap is honest, not silent. Scoped credentials
+> (SASL/SCRAM, IAM users) are v1alpha2 work. Until then, treat
+> `role` as documentation of intent, not enforcement.
 
 S3 is the same shape; see [`examples/s3/`](./examples/s3).
 

@@ -1,0 +1,23 @@
+# Controller config for e2e against MinIO.
+backends:
+
+- name: s3
+  driver: s3
+  config:
+    implementation: minio
+    endpoint: http://minio.blobs.svc.cluster.local:9000
+    region: us-east-1
+    forcePathStyle: true
+    accessKeyID:     ${MINIO_ROOT_USER}
+    secretAccessKey: ${MINIO_ROOT_PASSWORD}
+  defaults:
+    zone: e2e
+
+- name: r2-fake
+  driver: s3
+  config:
+    implementation: r2
+    endpoint: https://example.invalid
+    region: auto
+    accessKeyID: not-used
+    secretAccessKey: not-used

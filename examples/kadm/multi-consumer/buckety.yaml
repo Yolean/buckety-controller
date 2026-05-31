@@ -1,0 +1,10 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: orders
+spec:
+  backend: kafka
+  parameters:
+    partitions: "6"
+    config.retention.ms: "3600000"
+  retentionPolicy: Delete

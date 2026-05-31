@@ -1,0 +1,12 @@
+backends:
+- name: kafka
+  driver: kadm
+  config:
+    seedBrokers:
+    - redpanda.redpanda.svc.cluster.local:9093
+- name: objects
+  driver: s3
+  config:
+    endpoint: http://example.invalid
+    accessKeyID:     ${BUCKETY_E2E_UNSET_VAR}
+    secretAccessKey: ${BUCKETY_E2E_UNSET_VAR}

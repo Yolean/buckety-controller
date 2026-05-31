@@ -1,0 +1,11 @@
+backends:
+- name: kafka
+  driver: kadm
+  config:
+    seedBrokers:
+    - redpanda.redpanda.svc.cluster.local:9093
+- name: kafka
+  driver: kadm
+  config:
+    seedBrokers:
+    - redpanda.redpanda.svc.cluster.local:9093

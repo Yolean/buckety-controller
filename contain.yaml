@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://github.com/turbokube/contain/raw/refs/heads/main/jsonschema/config.json
+#
+# OCI image spec for ghcr.io/yolean/buckety-controller. Built (and
+# eventually pushed) by CI; the local PoC flow is:
+#
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+#     -trimpath \
+#     -ldflags "-s -w -X main.version=$(git describe --always --dirty)" \
+#     -o target/linux/amd64/buckety \
+#     ./cmd/buckety
+#   IMAGE=ghcr.io/yolean/buckety-controller:dev \
+#     contain build --output ./oci --push=false
+#   y-cluster images load ./oci --context=local
+base: gcr.io/distroless/static:nonroot@sha256:e3f945647ffb95b5839c07038d64f9811adf17308b9121d8a2b87b6a22a80a39
+platforms:
+- linux/amd64
+layers:
+- localFile:
+    pathPerPlatform:
+      linux/amd64: target/linux/amd64/buckety
+    containerPath: /usr/local/bin/buckety
+  layerAttributes:
+    uid: 65532
+    gid: 65534
+    mode: 0755
+entrypoint:
+- /usr/local/bin/buckety

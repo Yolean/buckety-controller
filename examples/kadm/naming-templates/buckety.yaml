@@ -1,0 +1,15 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: templated
+  labels:
+    yolean.se/generation: "003"
+spec:
+  backend: kafka
+  name: "${backend.zone}.${namespace}.${name}.v${label['yolean.se/generation']}"
+  parameters:
+    partitions: "1"
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: templated-topic

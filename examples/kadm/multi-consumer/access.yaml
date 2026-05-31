@@ -1,0 +1,29 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: orders-reader
+spec:
+  bucketyRef:
+    name: orders
+  credentialsSecretName: orders-reader
+  role: Reader
+---
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: orders-writer
+spec:
+  bucketyRef:
+    name: orders
+  credentialsSecretName: orders-writer
+  role: Writer
+---
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: orders-rw
+spec:
+  bucketyRef:
+    name: orders
+  credentialsSecretName: orders-rw
+  role: ReadWrite
