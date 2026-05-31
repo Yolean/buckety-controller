@@ -1,0 +1,13 @@
+# Build outputs
+/bin/
+/dist/
+/oci/
+/target/
+
+# Test artefacts
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
