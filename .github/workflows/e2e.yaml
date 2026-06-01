@@ -16,15 +16,18 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      digest: ${{ steps.release.outputs.digest }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Set up Go
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
       with:
-        go-version: stable
+        go-version-file: go.mod  # reproducibility: same Go as local builds
 
-    - name: Install k3d, kubectl, crane
+    - name: Install k3d, kubectl, crane, yq
       run: |
         set -euxo pipefail
         # k3d is the only provisioner that works in GHA; kind, minikube
@@ -37,8 +40,23 @@ jobs:
         # crane converts our OCI layout to a registry push without a
         # docker daemon round-trip.
         go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
+        # yq parses the pinned tag + digest out of the release kustomization.
+        go install github.com/mikefarah/yq/v4@v4.46.1
         echo "$HOME/go/bin" >>"$GITHUB_PATH"
         "$HOME/go/bin/crane" version
+        "$HOME/go/bin/yq" --version
+
+    - name: Read pinned release
+      id: release
+      run: |
+        set -euxo pipefail
+        K=deploy/kustomize/release/kustomization.yaml
+        T=$(yq '.images[] | select(.name == "ghcr.io/yolean/buckety-controller") | .newTag' "$K")
+        D=$(yq '.images[] | select(.name == "ghcr.io/yolean/buckety-controller") | .digest' "$K")
+        [[ -n "$T" && "$T" != null ]] || { echo "$K: no newTag" >&2; exit 1; }
+        [[ "$D" == sha256:* ]] || { echo "$K: bad digest $D" >&2; exit 1; }
+        echo "tag=$T"    >> "$GITHUB_OUTPUT"
+        echo "digest=$D" >> "$GITHUB_OUTPUT"
 
     - name: Start k3d cluster with local registry
       run: |
@@ -66,16 +84,34 @@ jobs:
     - name: Set up contain
       uses: solsson/setup-contain@49cc4cce1498df8a59e88fff52c1a9b747f11f08 # v1
 
-    - name: Build controller image (contain)
+    - name: Build controller image (contain) with pinned tag
+      env:
+        T: ${{ steps.release.outputs.tag }}
       run: |
         set -euxo pipefail
         CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
           -trimpath \
-          -ldflags "-s -w -X main.version=$(git describe --always --dirty)" \
+          -buildvcs=false \
+          -ldflags "-s -w -X main.version=${T}" \
           -o target/linux/amd64/buckety \
           ./cmd/buckety
-        IMAGE=ghcr.io/yolean/buckety-controller:${{ github.sha }} \
+        IMAGE="ghcr.io/yolean/buckety-controller:${T}" \
           contain build --output ./oci --push=false
+
+    - name: Assert produced digest matches pinned
+      env:
+        PINNED: ${{ steps.release.outputs.digest }}
+      run: |
+        set -euxo pipefail
+        BUILT=$(jq -r '.manifests[0].digest' oci/index.json)
+        if [[ "$BUILT" != "$PINNED" ]]; then
+          echo "Pinned digest in deploy/kustomize/release/kustomization.yaml" >&2
+          echo "  ${PINNED}" >&2
+          echo "does not match the digest produced by this build:" >&2
+          echo "  ${BUILT}" >&2
+          echo "Re-run scripts/bump-release.sh and commit the result." >&2
+          exit 1
+        fi
 
     - name: Run e2e harness
       env:
@@ -84,8 +120,8 @@ jobs:
         # PUSH_AS reaches the k3d local registry via its host-published
         # port; CONTROLLER_IMAGE uses the same registry's in-cluster
         # hostname so node containerd can pull it.
-        PUSH_AS: localhost:5000/yolean/buckety-controller:${{ github.sha }}
-        CONTROLLER_IMAGE: k3d-buckety-registry:5000/yolean/buckety-controller:${{ github.sha }}
+        PUSH_AS: localhost:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
+        CONTROLLER_IMAGE: k3d-buckety-registry:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
       run: ./test/e2e/run.sh
 
     - name: Surface controller logs on failure
@@ -98,11 +134,10 @@ jobs:
         kubectl -n blobs describe pod -l app=minio || true
 
   # The image push job runs only on main-branch builds in the canonical
-  # Yolean org with a successful e2e; it pins by digest into
-  # deploy/kustomize/release/ so consumers vendor a self-consistent base.
-  # The repository_owner gate means YoleanAgents (and forks) can iterate
-  # on the e2e job without publishing images or committing release pins.
-  # Stubbed for phase 1.
+  # Yolean org with a successful e2e. It rebuilds (proves reproducibility),
+  # asserts the same digest the e2e job verified, then crane pushes to
+  # ghcr.io. No commit-back: the digest is pinned in the commit being
+  # built. repository_owner gates YoleanAgents and forks from publishing.
   publish:
     if: >-
       github.ref == 'refs/heads/main'
@@ -111,13 +146,61 @@ jobs:
     needs: e2e
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-    - name: contain push (stub)
+
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      with:
+        go-version-file: go.mod  # reproducibility: same Go as local builds
+
+    - name: Install crane
       run: |
-        echo "TODO contain build --push --image ghcr.io/yolean/buckety-controller@..."
-    - name: template release base (stub)
+        set -euxo pipefail
+        go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
+        echo "$HOME/go/bin" >>"$GITHUB_PATH"
+
+    - name: Set up contain
+      uses: solsson/setup-contain@49cc4cce1498df8a59e88fff52c1a9b747f11f08 # v1
+
+    - name: Rebuild controller image with pinned tag
+      env:
+        T: ${{ needs.e2e.outputs.tag }}
       run: |
-        echo "TODO template deploy/kustomize/release/ with the pushed digest, commit back"
+        set -euxo pipefail
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+          -trimpath \
+          -buildvcs=false \
+          -ldflags "-s -w -X main.version=${T}" \
+          -o target/linux/amd64/buckety \
+          ./cmd/buckety
+        IMAGE="ghcr.io/yolean/buckety-controller:${T}" \
+          contain build --output ./oci --push=false
+
+    - name: Assert publish-time digest matches the e2e-tested digest
+      env:
+        PINNED: ${{ needs.e2e.outputs.digest }}
+      run: |
+        set -euxo pipefail
+        BUILT=$(jq -r '.manifests[0].digest' oci/index.json)
+        if [[ "$BUILT" != "$PINNED" ]]; then
+          echo "publish rebuild produced ${BUILT}, e2e verified ${PINNED}" >&2
+          exit 1
+        fi
+
+    - name: Login to ghcr.io
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        echo "$GITHUB_TOKEN" | crane auth login ghcr.io \
+          -u "${{ github.actor }}" --password-stdin
+
+    - name: Push image to ghcr.io
+      env:
+        T: ${{ needs.e2e.outputs.tag }}
+      run: |
+        set -euxo pipefail
+        crane push ./oci "ghcr.io/yolean/buckety-controller:${T}"
