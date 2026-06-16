@@ -1,13 +1,13 @@
 // Package s3 is the S3-protocol driver.
 //
-// v1alpha1 status: STUB. The driver registers, accepts the
-// config block, validates parameters at admission - but
-// EnsureBuckety/DeleteBuckety/GrantAccess return a clear error
-// that surfaces as Ready=False on the resource. Full
-// implementation lands in a follow-up branch alongside the s3
-// e2e scenarios already in examples/s3/. This file exists so
-// buckety-controller.yaml that mixes a kadm backend with an s3
-// backend loads and validates without surprises.
+// Backing services in scope: any S3-compatible API. The v1alpha1
+// CI matrix exercises VersityGW and MinIO; AWS S3, R2, Hetzner
+// and GCS interop are covered by the SPEC's client-library
+// compatibility bet (see SPEC.md §Drivers in v1alpha1). v1alpha1
+// has no per-access IAM minting; all BucketyAccess instances
+// against the same Buckety receive identical credentials drawn
+// from the backend's configured root keys and the reconciler
+// surfaces ScopingNotImplemented for non-ReadWrite roles.
 package s3
 
 import (
@@ -17,6 +17,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
+
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 	"github.com/Yolean/y-cluster/pkg/envsubst"
 	yaml "sigs.k8s.io/yaml"
@@ -25,15 +31,12 @@ import (
 // DriverName matches backends[].driver in buckety-controller.yaml.
 const DriverName = "s3"
 
-// version is the driver SemVer (see pkg/drivers/kadm for the
-// ldflags pattern). The s3 STUB advertises 0.0.x to make it
-// clear it has not reached v0.1.
-var version = "0.0.1"
-
-// ErrNotImplemented is the sentinel the stub returns. The
-// Buckety reconciler maps this to a stable Ready=False /
-// NotImplemented condition rather than retrying indefinitely.
-var ErrNotImplemented = errors.New("s3 driver not implemented in this build (v1alpha1 stub)")
+// version is the driver SemVer. Injected at build time via
+//
+//	-ldflags '-X github.com/Yolean/buckety-controller/pkg/drivers/s3.version=0.1.0'
+//
+// per SPEC §Driver versioning. Default keeps tests building.
+var version = "0.1.0"
 
 func init() {
 	registry.Register(DriverName, factory)
@@ -75,35 +78,116 @@ func factory(raw json.RawMessage) (registry.Driver, error) {
 	default:
 		return nil, fmt.Errorf("s3 config: unknown implementation %q", c.Implementation)
 	}
-	return &Driver{cfg: &c}, nil
+
+	// The AWS SDK requires a region even when BaseEndpoint is set;
+	// "auto" is the documented value R2 expects, "us-east-1" is the
+	// MinIO/VersityGW default. The empty case is normalised here so
+	// the eventual signer has something to fill into Authorization
+	// headers; this matches the AWS CLI's behaviour when --region is
+	// omitted with --endpoint-url.
+	region := c.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+	cl := awss3.NewFromConfig(aws.Config{
+		Region:      region,
+		Credentials: credentials.NewStaticCredentialsProvider(c.AccessKeyID, c.SecretAccessKey, ""),
+	}, func(o *awss3.Options) {
+		o.BaseEndpoint = aws.String(c.Endpoint)
+		o.UsePathStyle = c.ForcePathStyle
+	})
+
+	return &Driver{cfg: &c, client: cl}, nil
 }
 
-// Driver is the s3 STUB. See package docs.
+// Driver implements registry.Driver for S3-compatible backends.
 type Driver struct {
-	cfg *Config
+	cfg    *Config
+	client *awss3.Client
 }
 
 func (d *Driver) Name() string    { return DriverName }
 func (d *Driver) Version() string { return version }
 
-func (d *Driver) EnsureBuckety(_ context.Context, _ registry.EnsureRequest) error {
-	return ErrNotImplemented
+// EnsureBuckety creates the backend bucket. Idempotent on
+// BucketAlreadyOwnedByYou (and on BucketAlreadyExists, which on
+// most S3 implementations means the caller already owns the
+// bucket within the same account; on AWS it indicates a global
+// name collision and is treated identically here because by the
+// time we re-reconcile, head-bucket will determine whether we
+// can actually see it).
+//
+// v1alpha1 has no driver-known mutable parameters for S3 buckets;
+// EnsureBuckety is a create-or-noop. Capability-gated parameters
+// (currently just R2's jurisdiction) are immutable at the
+// admission layer and are stamped via CreateBucketConfiguration
+// below.
+func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) error {
+	input := &awss3.CreateBucketInput{Bucket: aws.String(req.Name)}
+	if cfg := bucketCreationConfig(d.cfg.Implementation, d.cfg.Region, req.Parameters); cfg != nil {
+		input.CreateBucketConfiguration = cfg
+	}
+	_, err := d.client.CreateBucket(ctx, input)
+	if err == nil {
+		return nil
+	}
+	if isAlreadyOwned(err) {
+		return nil
+	}
+	return fmt.Errorf("s3: create bucket %q: %w", req.Name, err)
 }
 
-func (d *Driver) DeleteBuckety(_ context.Context, _ string) error {
-	return ErrNotImplemented
+// DeleteBuckety removes the backend bucket. Idempotent on
+// NoSuchBucket. Buckets must be empty for DeleteBucket to
+// succeed; v1alpha1 does not empty the bucket on the operator's
+// behalf - SPEC §Lifecycle and deletion treats deletion as a
+// deliberate Delete-policy choice and the operator is expected to
+// have drained or accept that DeleteBucket may fail until empty.
+func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
+	_, err := d.client.DeleteBucket(ctx, &awss3.DeleteBucketInput{Bucket: aws.String(name)})
+	if err == nil {
+		return nil
+	}
+	if isNotFound(err) {
+		return nil
+	}
+	return fmt.Errorf("s3: delete bucket %q: %w", name, err)
 }
 
-func (d *Driver) GrantAccess(_ context.Context, _ registry.GrantRequest) (registry.GrantResult, error) {
-	return registry.GrantResult{}, ErrNotImplemented
+// GrantAccess returns the s3 Secret payload for a BucketyAccess.
+// v1alpha1: identical credentials for all roles (the backend's
+// root keys). Scoped=false signals the reconciler to surface
+// ScopingNotImplemented for non-ReadWrite roles.
+//
+// Secret keys per SPEC §Secret output > s3 driver:
+//
+//	endpoint, bucket, region (if non-empty), accessKeyID, secretAccessKey
+//
+// `bucket` is the resource-type key per the SPEC's stable
+// per-driver convention.
+func (d *Driver) GrantAccess(_ context.Context, req registry.GrantRequest) (registry.GrantResult, error) {
+	data := map[string][]byte{
+		"endpoint":        []byte(d.cfg.Endpoint),
+		"bucket":          []byte(req.BucketyName),
+		"accessKeyID":     []byte(d.cfg.AccessKeyID),
+		"secretAccessKey": []byte(d.cfg.SecretAccessKey),
+	}
+	if d.cfg.Region != "" {
+		data["region"] = []byte(d.cfg.Region)
+	}
+	return registry.GrantResult{
+		SecretData: data,
+		Principal:  "s3-root",
+		Scoped:     false,
+	}, nil
 }
 
+// RevokeAccess is a no-op in v1alpha1 (nothing to remove since
+// there is no per-access principal).
 func (d *Driver) RevokeAccess(_ context.Context, _ string) error { return nil }
 
-// ValidateParameters honours the capability-gating contract even
-// in the stub: jurisdiction is accepted only when implementation
-// is r2; admission rejects mismatches so the SPEC behaviour
-// matches once the EnsureBuckety side is implemented.
+// ValidateParameters honours the capability-gating contract:
+// jurisdiction is accepted only when implementation is r2.
 func (d *Driver) ValidateParameters(params map[string]string) error {
 	for k, v := range params {
 		switch k {
@@ -122,7 +206,7 @@ func (d *Driver) ValidateParameters(params map[string]string) error {
 }
 
 // ValidateUpdateParameters: jurisdiction is set-at-create and
-// immutable in v1alpha1; any change is a rejection.
+// immutable; any change is a rejection.
 func (d *Driver) ValidateUpdateParameters(oldParams, newParams map[string]string) error {
 	if err := d.ValidateParameters(newParams); err != nil {
 		return err
@@ -143,4 +227,86 @@ func (d *Driver) ValidateAccessParameters(params map[string]string) error {
 	}
 	return fmt.Errorf("s3 v0.1 accepts no BucketyAccess parameters; got: %s",
 		strings.Join(keys, ", "))
+}
+
+// ---- internals ----
+
+// bucketCreationConfig translates per-Buckety parameters into the
+// implementation-specific CreateBucketConfiguration. Returns nil
+// when no implementation-specific bucket-creation knobs apply.
+//
+// For AWS S3 the LocationConstraint follows the bucket's region
+// unless the region is us-east-1 (which uses an empty
+// LocationConstraint per AWS API rules).
+//
+// For R2 the jurisdiction parameter, when present, maps to the
+// LocationConstraint slot per Cloudflare's documented S3-interop
+// surface ("eu" places the bucket in the EU jurisdiction).
+//
+// For MinIO and VersityGW we deliberately omit
+// CreateBucketConfiguration entirely; both reject unexpected
+// LocationConstraint values on some versions.
+func bucketCreationConfig(impl, region string, params map[string]string) *s3types.CreateBucketConfiguration {
+	switch impl {
+	case "r2":
+		if j, ok := params["jurisdiction"]; ok && j != "" {
+			return &s3types.CreateBucketConfiguration{
+				LocationConstraint: s3types.BucketLocationConstraint(j),
+			}
+		}
+	case "aws":
+		if region != "" && region != "us-east-1" {
+			return &s3types.CreateBucketConfiguration{
+				LocationConstraint: s3types.BucketLocationConstraint(region),
+			}
+		}
+	}
+	return nil
+}
+
+// isAlreadyOwned reports whether err is the S3 service signalling
+// that the bucket already exists and is owned by the caller. We
+// treat both BucketAlreadyOwnedByYou and BucketAlreadyExists as
+// idempotent success: BucketAlreadyExists on AWS proper means a
+// global name collision, but on most other S3 implementations
+// (MinIO, VersityGW, R2 within an account) it surfaces for a
+// caller-owned bucket too and the next reconcile's drift check
+// will catch a genuinely foreign bucket via HeadBucket.
+func isAlreadyOwned(err error) bool {
+	var ae *s3types.BucketAlreadyOwnedByYou
+	if errors.As(err, &ae) {
+		return true
+	}
+	var ex *s3types.BucketAlreadyExists
+	if errors.As(err, &ex) {
+		return true
+	}
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		switch api.ErrorCode() {
+		case "BucketAlreadyOwnedByYou", "BucketAlreadyExists":
+			return true
+		}
+	}
+	return false
+}
+
+// isNotFound reports whether err is the S3 service signalling a
+// missing bucket. NoSuchBucket is the documented code; some
+// implementations (VersityGW, MinIO older releases) return
+// NotFound or a 404 status without a typed error, so we fall
+// back to APIError code matching.
+func isNotFound(err error) bool {
+	var nsb *s3types.NoSuchBucket
+	if errors.As(err, &nsb) {
+		return true
+	}
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		switch api.ErrorCode() {
+		case "NoSuchBucket", "NotFound":
+			return true
+		}
+	}
+	return false
 }
