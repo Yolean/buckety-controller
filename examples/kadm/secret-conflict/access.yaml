@@ -1,0 +1,9 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: clash-access
+spec:
+  bucketyRef:
+    name: clash
+  credentialsSecretName: occupied
+  role: ReadWrite

@@ -122,6 +122,7 @@ func main() {
 		Scheme:       mgr.GetScheme(),
 		Config:       loaded,
 		RequeueAfter: requeue,
+		Recorder:     mgr.GetEventRecorderFor("buckety-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "buckety controller setup failed")
 		os.Exit(1)
@@ -131,6 +132,7 @@ func main() {
 		Scheme:       mgr.GetScheme(),
 		Config:       loaded,
 		RequeueAfter: requeue,
+		Recorder:     mgr.GetEventRecorderFor("buckety-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "bucketyaccess controller setup failed")
 		os.Exit(1)

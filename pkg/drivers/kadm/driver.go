@@ -299,14 +299,15 @@ func (d *Driver) alignTopic(ctx context.Context, name string, existing *topicVie
 			Reason: fmt.Sprintf("replicationFactor: current=%d requested=%d (cannot be changed in place; needs partition reassignment)", existing.rf, wantRF),
 		}
 	}
-	// Apply config delta.
+	// Apply config delta. Keys removed from spec.parameters are not
+	// reverted on the broker: translateParameters never produces nil
+	// values, and per SPEC "Parameters" an omitted parameter means
+	// "pass nothing for this knob" - the last applied value simply
+	// stops being managed.
 	alters := []kadm.AlterConfig{}
 	for k, vp := range wantCfgs {
 		cur, hadCur := existing.configs[k]
-		switch {
-		case vp == nil && hadCur:
-			alters = append(alters, kadm.AlterConfig{Op: kadm.DeleteConfig, Name: k})
-		case vp != nil && (!hadCur || cur != *vp):
+		if vp != nil && (!hadCur || cur != *vp) {
 			alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: k, Value: vp})
 		}
 	}

@@ -21,6 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"k8s.io/client-go/tools/record"
+
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
@@ -32,6 +34,22 @@ type Reconciler struct {
 	Scheme       *runtime.Scheme
 	Config       *config.Loaded
 	RequeueAfter func() ctrl.Result
+	// Recorder emits Events alongside failure conditions so
+	// `kubectl describe` tells the story; nil disables (tests).
+	Recorder record.EventRecorder
+}
+
+// eventIfTransition emits an Event only when the (type, status)
+// pair differs from the pre-reconcile conditions, so steady-state
+// requeues do not spam the event stream.
+func (r *Reconciler) eventIfTransition(obj runtime.Object, baseConds []metav1.Condition, condType string, status metav1.ConditionStatus, eventType, reason, message string) {
+	if r.Recorder == nil {
+		return
+	}
+	if c := meta.FindStatusCondition(baseConds, condType); c != nil && c.Status == status {
+		return
+	}
+	r.Recorder.Event(obj, eventType, reason, message)
 }
 
 // SetupWithManager registers this controller with the manager.
@@ -125,6 +143,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if bkyErr != nil {
 		if apierrors.IsNotFound(bkyErr) {
+			r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse,
+				corev1.EventTypeWarning, "BucketyNotFound",
+				fmt.Sprintf("Buckety %q not found in namespace %q", access.Spec.BucketyRef.Name, access.Namespace))
 			setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse,
 				"BucketyNotFound",
 				fmt.Sprintf("Buckety %q not found in namespace %q", access.Spec.BucketyRef.Name, access.Namespace),
@@ -150,6 +171,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	backend, ok := r.Config.Lookup(bky.Status.Backend)
 	if !ok {
+		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse,
+			corev1.EventTypeWarning, "BackendUnavailable",
+			fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Status.Backend))
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse,
 			"BackendUnavailable",
 			fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Status.Backend),
@@ -162,6 +186,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// the Buckety does not exist yet, so this is the authoritative
 	// check for BucketyAccess parameters.
 	if err := backend.Driver.ValidateAccessParameters(access.Spec.Parameters); err != nil {
+		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse,
+			corev1.EventTypeWarning, "InvalidParameters", err.Error())
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), access.Generation)
 		return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
 	}
@@ -172,9 +198,37 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		Parameters:  access.Spec.Parameters,
 	})
 	if err != nil {
+		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse,
+			corev1.EventTypeWarning, "GrantFailed", err.Error())
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed", err.Error(), access.Generation)
 		_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
 		return ctrl.Result{}, err
+	}
+
+	// Refuse to touch a Secret this BucketyAccess does not control:
+	// CreateOrUpdate would adopt an orphan Secret in place,
+	// clobbering its data and later garbage-collecting it with the
+	// access. This also covers a Secret still owned by a deleted
+	// predecessor access (GC lag): the conflict clears on a later
+	// requeue once the old Secret is gone.
+	var existing corev1.Secret
+	getErr := r.Get(ctx, types.NamespacedName{Namespace: access.Namespace, Name: access.Spec.CredentialsSecretName}, &existing)
+	switch {
+	case getErr == nil && !metav1.IsControlledBy(&existing, &access):
+		msg := fmt.Sprintf("secret %q exists and is not managed by this BucketyAccess; delete it or pick another credentialsSecretName", access.Spec.CredentialsSecretName)
+		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, corev1.EventTypeWarning, "SecretConflict", msg)
+		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretConflict", msg, access.Generation)
+		if err := r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess)); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Periodic requeue notices when the conflicting Secret goes
+		// away (an unowned Secret's deletion maps to no watch).
+		if r.RequeueAfter != nil {
+			return r.RequeueAfter(), nil
+		}
+		return ctrl.Result{}, nil
+	case getErr != nil && !apierrors.IsNotFound(getErr):
+		return ctrl.Result{}, getErr
 	}
 
 	// Mint/update the Secret with this BucketyAccess as owner.
@@ -200,6 +254,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			log.Info("secret write skipped; namespace is terminating")
 			return ctrl.Result{}, nil
 		}
+		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse,
+			corev1.EventTypeWarning, "SecretWriteFailed", err.Error())
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretWriteFailed", err.Error(), access.Generation)
 		_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
 		return ctrl.Result{}, err
@@ -219,6 +275,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		meta.RemoveStatusCondition(&access.Status.Conditions, "ScopingNotImplemented")
 	}
 
+	r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionTrue,
+		corev1.EventTypeNormal, "SecretMinted",
+		fmt.Sprintf("secret %q minted for backend resource %q", access.Spec.CredentialsSecretName, bky.Status.BackendResourceName))
 	setCond(&access.Status.Conditions, "Ready", metav1.ConditionTrue, "SecretMinted", "", access.Generation)
 	access.Status.ObservedGeneration = access.Generation
 	if err := r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess)); err != nil {

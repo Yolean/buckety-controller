@@ -23,6 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
+
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
@@ -38,6 +41,22 @@ type Reconciler struct {
 	Config         *config.Loaded
 	RequeueAfter   func() ctrl.Result // periodic re-check cadence; injected so tests can stub
 	ControllerName string             // for ownership references on implicit BucketyAccess
+	// Recorder emits Events alongside condition changes so
+	// `kubectl describe` tells the story; nil disables (tests).
+	Recorder record.EventRecorder
+}
+
+// eventIfTransition emits an Event only when the (type, status)
+// pair differs from the pre-reconcile conditions, so steady-state
+// requeues do not spam the event stream.
+func (r *Reconciler) eventIfTransition(obj runtime.Object, baseConds []metav1.Condition, condType string, status metav1.ConditionStatus, eventType, reason, message string) {
+	if r.Recorder == nil {
+		return
+	}
+	if c := meta.FindStatusCondition(baseConds, condType); c != nil && c.Status == status {
+		return
+	}
+	r.Recorder.Event(obj, eventType, reason, message)
 }
 
 // SetupWithManager registers the controller with the supplied
@@ -143,6 +162,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// exempt every pre-1.0 resource from the compatibility check.
 	runningMajor, _ := majorOf(backend.Driver.Version())
 	if bky.Status.Backend != "" && runningMajor != bky.Status.DriverMajor {
+		r.eventIfTransition(&bky, baseBky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue,
+			corev1.EventTypeWarning, "DriverVersionIncompatible",
+			fmt.Sprintf("stamped major=%d, running=%d; reconcile paused", bky.Status.DriverMajor, runningMajor))
 		setCond(&bky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue,
 			"DriverMajorBump",
 			fmt.Sprintf("stamped major=%d, running=%d; pin a compatible binary or migrate the resource", bky.Status.DriverMajor, runningMajor),
@@ -163,6 +185,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// fallback that surfaces invalid parameters on status instead of
 	// letting them travel to the backend as an opaque driver error.
 	if err := backend.Driver.ValidateParameters(bky.Spec.Parameters); err != nil {
+		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse,
+			corev1.EventTypeWarning, "InvalidParameters", err.Error())
 		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), bky.Generation)
 		setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "InvalidParameters", "spec change required", bky.Generation)
 		return ctrl.Result{}, r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
@@ -175,12 +199,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		Parameters: bky.Spec.Parameters,
 	}); err != nil {
 		if registry.IsParameterDrift(err) {
+			r.eventIfTransition(&bky, baseBky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue,
+				corev1.EventTypeWarning, "ParameterDrift", err.Error())
 			setCond(&bky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable", err.Error(), bky.Generation)
 			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterDrift", err.Error(), bky.Generation)
 			setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Paused", "drift requires human resolution", bky.Generation)
 			return ctrl.Result{}, r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
 		}
 		log.Error(err, "driver.EnsureBuckety failed")
+		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse,
+			corev1.EventTypeWarning, "EnsureFailed", err.Error())
 		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed", err.Error(), bky.Generation)
 		_ = r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
 		return ctrl.Result{}, err
@@ -194,6 +222,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// All done.
+	r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionTrue,
+		corev1.EventTypeNormal, "Provisioned",
+		fmt.Sprintf("backend resource %q ensured on backend %q", bky.Status.BackendResourceName, bky.Status.Backend))
 	setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Idle", "", bky.Generation)
 	setCond(&bky.Status.Conditions, "Ready", metav1.ConditionTrue, "EnsuredOnBackend", "", bky.Generation)
 	bky.Status.ObservedGeneration = bky.Generation
@@ -226,6 +257,9 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		blocking = append(blocking, a.Name)
 	}
 	if len(blocking) > 0 {
+		r.eventIfTransition(bky, base.Status.Conditions, "BlockedByAccesses", metav1.ConditionTrue,
+			corev1.EventTypeWarning, "BlockedByAccesses",
+			fmt.Sprintf("deletion waits on BucketyAccess: %s", strings.Join(blocking, ", ")))
 		setCond(&bky.Status.Conditions, "BlockedByAccesses", metav1.ConditionTrue, "Pending",
 			fmt.Sprintf("waiting on BucketyAccess: %s", strings.Join(blocking, ", ")),
 			bky.Generation)
@@ -248,6 +282,9 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 	// retentionPolicy to Retain (mutable).
 	if bky.Spec.RetentionPolicy == bucketyv1.RetentionDelete && bky.Status.BackendResourceName != "" {
 		if !backendOK {
+			r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue,
+				corev1.EventTypeWarning, "DeletionBlocked",
+				fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q", bky.Spec.Backend, bky.Status.BackendResourceName))
 			setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
 				fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q; restore the backend in buckety-controller.yaml or set retentionPolicy=Retain",
 					bky.Spec.Backend, bky.Status.BackendResourceName),
@@ -262,6 +299,8 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 			return ctrl.Result{}, nil
 		}
 		if err := backend.Driver.DeleteBuckety(ctx, bky.Status.BackendResourceName); err != nil {
+			r.eventIfTransition(bky, base.Status.Conditions, "Ready", metav1.ConditionFalse,
+				corev1.EventTypeWarning, "DeleteFailed", err.Error())
 			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DeleteFailed", err.Error(), bky.Generation)
 			_ = r.Status().Patch(ctx, bky, client.MergeFrom(base))
 			return ctrl.Result{}, err
@@ -345,6 +384,9 @@ func (r *Reconciler) reconcileImplicitAccess(ctx context.Context, bky *bucketyv1
 }
 
 func (r *Reconciler) surfaceBackendUnavailable(ctx context.Context, bky, base *bucketyv1.Buckety) (ctrl.Result, error) {
+	r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue,
+		corev1.EventTypeWarning, "BackendUnavailable",
+		fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Spec.Backend))
 	setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
 		fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Spec.Backend),
 		bky.Generation)
@@ -353,6 +395,10 @@ func (r *Reconciler) surfaceBackendUnavailable(ctx context.Context, bky, base *b
 }
 
 func (r *Reconciler) surfaceCondition(ctx context.Context, bky, base *bucketyv1.Buckety, condType string, status metav1.ConditionStatus, reason, message string) (ctrl.Result, error) {
+	// Only failure surfaces route through here; the happy path
+	// records its own Provisioned event.
+	r.eventIfTransition(bky, base.Status.Conditions, condType, status,
+		corev1.EventTypeWarning, reason, message)
 	setCond(&bky.Status.Conditions, condType, status, reason, message, bky.Generation)
 	return ctrl.Result{}, r.Status().Patch(ctx, bky, client.MergeFrom(base))
 }

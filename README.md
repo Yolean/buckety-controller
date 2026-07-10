@@ -124,6 +124,30 @@ manifest: it hashes the file content into the Secret name, so a
 config change triggers a controller-Pod rollout on the next
 `kubectl apply` automatically.
 
+### Without cert-manager
+
+The base includes a `ValidatingWebhookConfiguration` whose CA is
+injected by cert-manager (`cert-manager.io/inject-ca-from`), and
+the webhook server needs a TLS Secret named
+`buckety-controller-webhook-tls`. On clusters without
+cert-manager the controller cannot start in its default shape.
+The cert-less recipe:
+
+1. Vendor `deploy/kustomize/crd/` and `deploy/kustomize/controller/`
+   separately (skip the composite base).
+2. Drop `webhook.yaml` from your controller overlay (or patch the
+   `ValidatingWebhookConfiguration` out).
+3. Pass `--enable-webhook=false` to the controller via a
+   Deployment args patch. No `Certificate`, no TLS Secret needed.
+
+In webhook-disabled mode, per-driver parameter and resolved-name
+validation runs in the reconcile loop and surfaces as
+`Ready=False` with reason `InvalidParameters` or `NameInvalid` on
+the resource's status (plus a Warning Event), instead of failing
+the apply. CRD-level CEL still enforces `spec.backend` /
+`spec.name` / `bucketyRef` / `credentialsSecretName` immutability
+and the `role` / `retentionPolicy` enums regardless.
+
 ## Configure
 
 The controller loads `buckety-controller.yaml` from a directory
@@ -356,6 +380,31 @@ Standard conditions you'll see on resources:
   honour. The Secret still mints with the backend's root creds;
   this condition warns you that the scope you asked for is not
   enforced.
+- **`Ready=False` reason `InvalidParameters`** — the driver
+  rejected `spec.parameters` (or `NameInvalid` for a `spec.name`
+  template resolving to an illegal topic/bucket name). With the
+  webhook enabled these are normally rejected at apply time; the
+  reconcile-loop check is what you see in webhook-disabled
+  deployments, or when a `BucketyAccess` was authored before its
+  `Buckety` existed.
+- **`Ready=False` reason `SecretConflict`** — the
+  `credentialsSecretName` names a Secret this `BucketyAccess`
+  does not own. The controller refuses to overwrite it (adopting
+  it would clobber its data and later garbage-collect it). Delete
+  the conflicting Secret or pick another name; the access recovers
+  on the next periodic re-check.
+- **Deletion hangs with `BackendUnavailable`** — a `Buckety` with
+  `retentionPolicy: Delete` is being deleted while its backend is
+  missing from `buckety-controller.yaml`. Removing the finalizer
+  would silently orphan the backend resource, so the controller
+  blocks. Restore the backend in config, or set
+  `retentionPolicy: Retain` (mutable) to release the resource
+  without backend cleanup.
+
+Failure conditions are accompanied by Warning Events on
+transition, so `kubectl describe buckety/<name>` (or
+`bucketyaccess/<name>`) shows the history even after a condition
+clears.
 
 ### Controller won't start
 
