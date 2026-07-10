@@ -21,8 +21,17 @@
 #                      hostnames (k3d local registry on a docker network
 #                      reaches as k3d-<name>:5000 from inside the cluster
 #                      but as localhost:<port> from the host).
-#   KEEP_FAILED        If true, scenario namespaces are kept on failure
-#                      for `kubectl describe` / `kubectl logs`.
+#   KEEP_FAILED        If true, scenario namespaces are kept even on
+#                      PASS. Failed scenarios always leave their
+#                      namespace standing for `kubectl describe` /
+#                      `kubectl logs` (SPEC.md section "E2E harness
+#                      and parity" #3).
+#   E2E_IMAGE_BASE / E2E_IMAGE_PATCH / E2E_IMAGE_MAJOR
+#   E2E_VERSION_BASE / E2E_VERSION_PATCH / E2E_VERSION_MAJOR
+#                      Controller images built with rotated driver
+#                      versions, for the driver-version scenario. CI
+#                      builds and pushes these; when unset the
+#                      scenario logs SKIPPED and exits 0.
 #   KUBECONFIG         Cluster the harness writes to.
 #   CONTROLLER_NS      Namespace the buckety-controller runs in.
 #                      Default: buckety.
@@ -122,12 +131,15 @@ ensure_webhook_tls() {
     -p="[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${ca_bundle}\"}]"
 }
 
-teardown_overlay() {
-  local impl="$1"
-  local overlay="$OVERLAYS_DIR/$impl"
-  # Best-effort: ignore missing resources.
-  kubectl delete -k "$overlay" --ignore-not-found --wait=false || true
-}
+# No teardown between implementations. Deleting the overlay would
+# delete the CRDs while scenario CRs (which carry finalizers) may
+# still be terminating in their namespaces; the CRD then hangs in
+# Terminating and the next implementation's apply is rejected with
+# "create not allowed while custom resource definition is
+# terminating". apply_overlay converges the config Secret and the
+# Deployment in place instead; kubectl apply prunes the env vars a
+# previous overlay patched in, because they are absent from the
+# next overlay's last-applied configuration.
 
 # ---- scenario discovery and execution -------------------------
 
@@ -153,6 +165,10 @@ scenario_matches_impl() {
   esac
 }
 
+# run_scenario is invoked in an `if` condition, which makes bash
+# ignore `set -e` for everything inside the function body. Every
+# step therefore propagates failure explicitly with `|| return 1`;
+# do not add a step here without one.
 run_scenario() {
   local scenario="$1" impl="$2" driver="$3"
   local name="$(basename "$scenario")"
@@ -162,40 +178,44 @@ run_scenario() {
   ns="$(echo "$ns" | tr 'A-Z_' 'a-z-' | head -c 60 | sed 's/-$//')"
 
   log "=== scenario: $scenario -> $ns (impl=$impl) ==="
-  kubectl create namespace "$ns"
-  trap 'on_scenario_exit '"$ns"' '"$KEEP_FAILED"'' EXIT
+  kubectl create namespace "$ns" || return 1
 
-  kubectl apply -k "$scenario" -n "$ns"
+  kubectl apply -k "$scenario" -n "$ns" || {
+    log "scenario FAILED (apply): $scenario; namespace $ns left standing"
+    return 1
+  }
 
-  E2E_NAMESPACE="$ns" \
-  E2E_CONTROLLER_NS="$CONTROLLER_NS" \
-  E2E_IMPLEMENTATION="$impl" \
-  E2E_LIB="$HERE" \
-  E2E_BACKEND_ZONE="${E2E_BACKEND_ZONE:-e2e}" \
-  E2E_KAFKA_NAMESPACE="${E2E_KAFKA_NAMESPACE:-redpanda}" \
-  E2E_KAFKA_BOOTSTRAP="${E2E_KAFKA_BOOTSTRAP:-redpanda.redpanda.svc.cluster.local:9093}" \
-  E2E_ORIGINAL_CONFIG="$OVERLAYS_DIR/$impl/buckety-controller.yaml" \
-  E2E_RENAMED_CONFIG="$OVERLAYS_DIR/$impl/buckety-controller.renamed.yaml" \
-  E2E_VERSION_BASE="${E2E_VERSION_BASE:-0.1.0}" \
-  E2E_VERSION_PATCH="${E2E_VERSION_PATCH:-0.1.1}" \
-  E2E_VERSION_MAJOR="${E2E_VERSION_MAJOR:-1.0.0}" \
-  E2E_IMAGE_BASE="${E2E_IMAGE_BASE:-ghcr.io/yolean/buckety-controller:dev}" \
-  E2E_IMAGE_PATCH="${E2E_IMAGE_PATCH:-ghcr.io/yolean/buckety-controller:dev}" \
-  E2E_IMAGE_MAJOR="${E2E_IMAGE_MAJOR:-ghcr.io/yolean/buckety-controller:dev}" \
-  bash "$scenario/assert.sh"
+  # </dev/null: assert.sh helpers use `kubectl run -i`, which would
+  # otherwise forward and consume this shell's stdin. When stdin is
+  # the scenario list of a `while read` caller, that silently
+  # truncates the run.
+  if ! E2E_NAMESPACE="$ns" \
+    E2E_CONTROLLER_NS="$CONTROLLER_NS" \
+    E2E_IMPLEMENTATION="$impl" \
+    E2E_LIB="$HERE" \
+    E2E_BACKEND_ZONE="${E2E_BACKEND_ZONE:-e2e}" \
+    E2E_KAFKA_NAMESPACE="${E2E_KAFKA_NAMESPACE:-redpanda}" \
+    E2E_KAFKA_BOOTSTRAP="${E2E_KAFKA_BOOTSTRAP:-redpanda.redpanda.svc.cluster.local:9093}" \
+    E2E_ORIGINAL_CONFIG="$OVERLAYS_DIR/$impl/buckety-controller.yaml" \
+    E2E_RENAMED_CONFIG="$OVERLAYS_DIR/$impl/buckety-controller.renamed.yaml" \
+    E2E_VERSION_BASE="${E2E_VERSION_BASE:-}" \
+    E2E_VERSION_PATCH="${E2E_VERSION_PATCH:-}" \
+    E2E_VERSION_MAJOR="${E2E_VERSION_MAJOR:-}" \
+    E2E_IMAGE_BASE="${E2E_IMAGE_BASE:-}" \
+    E2E_IMAGE_PATCH="${E2E_IMAGE_PATCH:-}" \
+    E2E_IMAGE_MAJOR="${E2E_IMAGE_MAJOR:-}" \
+    bash "$scenario/assert.sh" </dev/null; then
+    log "scenario FAILED (assert): $scenario; namespace $ns left standing"
+    return 1
+  fi
 
   log "--- scenario PASS: $scenario (impl=$impl) ---"
-  kubectl delete namespace "$ns" --wait=false || true
-  trap - EXIT
-}
-
-on_scenario_exit() {
-  local ns="$1" keep="$2"
-  if [[ "$keep" == "true" ]]; then
+  if [[ "$KEEP_FAILED" == "true" ]]; then
     log "KEEP_FAILED=true; namespace $ns left for inspection"
-    return
+  else
+    kubectl delete namespace "$ns" --wait=false || true
   fi
-  kubectl delete namespace "$ns" --wait=false --ignore-not-found || true
+  return 0
 }
 
 # ---- main -----------------------------------------------------
@@ -214,7 +234,11 @@ for impl in "${impl_list[@]}"; do
   log "============================================================"
   apply_overlay "$impl"
 
-  while IFS= read -r scenario; do
+  # The scenario list is materialised up front instead of streamed
+  # on stdin, so nothing a scenario runs can consume the remainder
+  # of the list.
+  mapfile -t scenario_list < <(scenarios_for_driver "$driver")
+  for scenario in "${scenario_list[@]}"; do
     [[ -z "$scenario" ]] && continue
     scenario_matches_impl "$scenario" "$impl" "$driver" || continue
     if run_scenario "$scenario" "$impl" "$driver"; then
@@ -223,9 +247,7 @@ for impl in "${impl_list[@]}"; do
       results["$impl/$scenario"]=FAIL
       fails=$((fails + 1))
     fi
-  done < <(scenarios_for_driver "$driver")
-
-  teardown_overlay "$impl"
+  done
 done
 
 log "============================================================"
