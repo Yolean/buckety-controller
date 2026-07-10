@@ -108,9 +108,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// Drift on driver major after stickiness.
+	// Drift on driver major after stickiness. Stampedness is
+	// signalled by status.backend (set together with driverMajor at
+	// first reconcile): 0 is a legitimate stamped major for 0.x
+	// drivers, so `driverMajor != 0` cannot be the guard - it would
+	// exempt every pre-1.0 resource from the compatibility check.
 	runningMajor, _ := majorOf(backend.Driver.Version())
-	if bky.Status.DriverMajor != 0 && runningMajor != bky.Status.DriverMajor {
+	if bky.Status.Backend != "" && runningMajor != bky.Status.DriverMajor {
 		setCond(&bky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue,
 			"DriverMajorBump",
 			fmt.Sprintf("stamped major=%d, running=%d; pin a compatible binary or migrate the resource", bky.Status.DriverMajor, runningMajor),

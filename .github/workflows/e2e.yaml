@@ -113,6 +113,30 @@ jobs:
           exit 1
         fi
 
+    # The driver-version scenario rotates the controller between a
+    # base, a patch-bumped and a major-bumped driver build (SPEC.md
+    # scenario #9, docs/SCAFFOLDING.md "Driver version stamping").
+    # These images exist only for that rotation: built here with
+    # per-driver -X flags and pushed straight to the run's local
+    # registry. They are not digest-pinned or published.
+    - name: Build and push driver-version rotation images
+      run: |
+        set -euxo pipefail
+        for v in 0.1.1 1.0.0; do
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags "-s -w -X main.version=dv-${v} \
+              -X github.com/Yolean/buckety-controller/pkg/drivers/kadm.version=${v} \
+              -X github.com/Yolean/buckety-controller/pkg/drivers/s3.version=${v}" \
+            -o target/linux/amd64/buckety \
+            ./cmd/buckety
+          IMAGE="ghcr.io/yolean/buckety-controller:dv-${v}" \
+            contain build --output "./oci-dv-${v}" --push=false
+          crane push --insecure "./oci-dv-${v}" \
+            "localhost:5000/yolean/buckety-controller:dv-${v}"
+        done
+
     - name: Run e2e harness
       env:
         IMPLEMENTATIONS: redpanda,versitygw,minio
@@ -122,6 +146,12 @@ jobs:
         # hostname so node containerd can pull it.
         PUSH_AS: localhost:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
         CONTROLLER_IMAGE: k3d-buckety-registry:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
+        E2E_VERSION_BASE: 0.1.0
+        E2E_VERSION_PATCH: 0.1.1
+        E2E_VERSION_MAJOR: 1.0.0
+        E2E_IMAGE_BASE: k3d-buckety-registry:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
+        E2E_IMAGE_PATCH: k3d-buckety-registry:5000/yolean/buckety-controller:dv-0.1.1
+        E2E_IMAGE_MAJOR: k3d-buckety-registry:5000/yolean/buckety-controller:dv-1.0.0
       run: ./test/e2e/run.sh
 
     - name: Surface controller logs on failure
