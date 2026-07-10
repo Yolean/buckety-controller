@@ -1,0 +1,8 @@
+backends:
+- name: s3
+  driver: s3
+  config:
+    implementation: gcs
+    endpoint: http://example.invalid
+    accessKeyID: literal
+    secretAccessKey: literal

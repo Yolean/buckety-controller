@@ -1,0 +1,7 @@
+backends:
+- name: s3
+  driver: s3
+  config:
+    endpont: http://versitygw.blobs.svc.cluster.local:9000
+    accessKeyID: literal
+    secretAccessKey: literal

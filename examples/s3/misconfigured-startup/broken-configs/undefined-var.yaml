@@ -1,0 +1,7 @@
+backends:
+- name: s3
+  driver: s3
+  config:
+    endpoint: http://example.invalid
+    accessKeyID:     ${BUCKETY_E2E_UNSET_VAR}
+    secretAccessKey: ${BUCKETY_E2E_UNSET_VAR}

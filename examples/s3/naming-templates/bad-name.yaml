@@ -1,0 +1,12 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: bad-name
+  labels:
+    # Legal as a label value, illegal in an S3 bucket name
+    # (uppercase + underscore).
+    yolean.se/generation: "V3_UP"
+spec:
+  backend: s3
+  name: "${name}-${label['yolean.se/generation']}"
+  retentionPolicy: Delete

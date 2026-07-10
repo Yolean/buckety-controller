@@ -4,47 +4,43 @@ set -euo pipefail
 
 wait_ready buckety/sticky-orig 120s
 sticky_backend="$(kc get buckety/sticky-orig -o jsonpath='{.status.backend}')"
-[[ "$sticky_backend" == "kafka" ]] \
-  || fail "status.backend stamped as '$sticky_backend', expected 'kafka'"
+[[ "$sticky_backend" == "s3" ]] \
+  || fail "status.backend stamped as '$sticky_backend', expected 's3'"
 
-# Save current controller config Secret and patch a rename.
-# The harness provides a renamed buckety-controller.yaml under
-# $E2E_RENAMED_CONFIG; this scenario applies it, restarts the
-# controller, and restores the original at the end.
-: "${E2E_RENAMED_CONFIG:?harness must set E2E_RENAMED_CONFIG to a yaml file that defines backend 'kafka-renamed' instead of 'kafka'}"
+: "${E2E_RENAMED_CONFIG:?harness must set E2E_RENAMED_CONFIG to a yaml file that defines backend 's3-renamed' instead of 's3'}"
 : "${E2E_ORIGINAL_CONFIG:?harness must set E2E_ORIGINAL_CONFIG to the unmodified controller config}"
 
-restore() {
-  log "restoring original controller config"
+apply_config() {
   kcg -n "$E2E_CONTROLLER_NS" create secret generic buckety-controller-config \
-    --from-file=buckety-controller.yaml="$E2E_ORIGINAL_CONFIG" \
+    --from-file=buckety-controller.yaml="$1" \
     --dry-run=client -o yaml | kcg apply -f -
   kcg -n "$E2E_CONTROLLER_NS" rollout restart deploy/buckety-controller
   kcg -n "$E2E_CONTROLLER_NS" rollout status  deploy/buckety-controller --timeout=60s
 }
+
+restore() {
+  log "restoring original controller config"
+  apply_config "$E2E_ORIGINAL_CONFIG"
+}
 trap restore EXIT
 
-log "swapping controller config: kafka -> kafka-renamed"
-kcg -n "$E2E_CONTROLLER_NS" create secret generic buckety-controller-config \
-  --from-file=buckety-controller.yaml="$E2E_RENAMED_CONFIG" \
-  --dry-run=client -o yaml | kcg apply -f -
-kcg -n "$E2E_CONTROLLER_NS" rollout restart deploy/buckety-controller
-kcg -n "$E2E_CONTROLLER_NS" rollout status  deploy/buckety-controller --timeout=60s
+log "swapping controller config: s3 -> s3-renamed"
+apply_config "$E2E_RENAMED_CONFIG"
 
 wait_condition buckety/sticky-orig BackendUnavailable True 90s
 [[ "$(condition_status buckety/sticky-orig Ready)" == "False" ]] \
   || fail "sticky-orig Ready should be False under BackendUnavailable"
 still_sticky="$(kc get buckety/sticky-orig -o jsonpath='{.status.backend}')"
-[[ "$still_sticky" == "kafka" ]] \
+[[ "$still_sticky" == "s3" ]] \
   || fail "status.backend mutated to '$still_sticky'; stickiness violated"
 
 # A fresh Buckety against the renamed backend still works.
-log "applying new Buckety against kafka-renamed"
+log "applying new Buckety against s3-renamed"
 kc apply -f "$(dirname "$0")/renamed.yaml"
 wait_ready buckety/sticky-new 120s
 
 # Deletion with retentionPolicy=Delete blocks while the backend is
-# missing: removing the finalizer would silently orphan the topic.
+# missing: removing the finalizer would silently orphan the bucket.
 log "deleting sticky-orig while its backend is missing; expecting the deletion to block"
 kc delete buckety/sticky-orig --wait=false
 blocked=""
@@ -57,9 +53,9 @@ done
 [[ "$blocked" == *"deletion blocked"* ]] \
   || fail "sticky-orig deletion did not surface 'deletion blocked' (Ready message: '$blocked')"
 kc get buckety/sticky-orig >/dev/null 2>&1 \
-  || fail "sticky-orig disappeared while its backend was missing; the topic would be orphaned"
+  || fail "sticky-orig disappeared while its backend was missing; the bucket would be orphaned"
 
-# Restoring the backend unblocks the deletion and removes the topic.
+# Restoring the backend unblocks the deletion and removes the bucket.
 restore
 kc wait --for=delete buckety/sticky-orig --timeout=90s \
   || fail "sticky-orig deletion did not complete after the backend was restored"

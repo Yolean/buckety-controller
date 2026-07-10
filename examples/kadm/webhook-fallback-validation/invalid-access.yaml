@@ -1,0 +1,11 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: bad-access
+spec:
+  bucketyRef:
+    name: base
+  credentialsSecretName: bad-access
+  role: ReadWrite
+  parameters:
+    bogus: "1"

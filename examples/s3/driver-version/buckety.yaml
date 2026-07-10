@@ -1,0 +1,10 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: pinned
+spec:
+  backend: s3
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: pinned-bucket

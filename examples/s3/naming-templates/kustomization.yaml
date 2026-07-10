@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# bad-template.yaml and bad-name.yaml are applied by assert.sh,
+# which expects admission to reject them.
+resources:
+- buckety.yaml

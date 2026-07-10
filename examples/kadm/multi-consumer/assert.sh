@@ -31,4 +31,18 @@ kafka_topic_exists "$t_rw"
   || "$(condition_status bucketyaccess/orders-rw ScopingNotImplemented)" == "False" ]] \
   || fail "BucketyAccess/orders-rw should not have ScopingNotImplemented=True"
 
+# Deletion blocks on explicit accesses (SPEC "Lifecycle and
+# deletion"): the controller surfaces BlockedByAccesses and does
+# not cascade. Removing the accesses unblocks promptly via the
+# access watch.
+log "deleting buckety/orders; expecting BlockedByAccesses"
+kc delete buckety/orders --wait=false
+wait_condition buckety/orders BlockedByAccesses True 60s
+kc get buckety/orders >/dev/null 2>&1 \
+  || fail "orders deleted while explicit accesses existed; cascade is not allowed"
+log "deleting the accesses; expecting orders deletion to complete"
+kc delete bucketyaccess --all --wait=true --timeout=60s
+kc wait --for=delete buckety/orders --timeout=60s \
+  || fail "orders deletion did not complete after accesses were removed"
+
 log "multi-consumer PASS"

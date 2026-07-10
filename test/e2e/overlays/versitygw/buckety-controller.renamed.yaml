@@ -1,12 +1,11 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/pkg/config/schema/buckety-controller.schema.json
-# Controller config for e2e against VersityGW.
-# Backing service is sideloaded by the GHA prelude / locally;
-# expected at versitygw.blobs.svc.cluster.local:9000.
-# Root keys come in via ${VERSITYGW_ROOT_ACCESSKEY} /
-# ${VERSITYGW_ROOT_SECRETKEY}; see deployment-env.yaml.
+# Same connection details as buckety-controller.yaml but with the
+# backend name changed from 's3' to 's3-renamed'. Used by the
+# s3/backend-stickiness scenario to prove status.backend stickiness
+# survives a config rename.
 backends:
 
-- name: s3
+- name: s3-renamed
   driver: s3
   config:
     implementation: versitygw
@@ -18,9 +17,6 @@ backends:
   defaults:
     zone: e2e
 
-# Fake R2 backend used by examples/s3/r2/jurisdiction/. Reachability
-# is irrelevant - admission decisions read the implementation
-# discriminator at controller startup.
 - name: r2-fake
   driver: s3
   config:

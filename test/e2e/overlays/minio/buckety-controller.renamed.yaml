@@ -1,8 +1,11 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/pkg/config/schema/buckety-controller.schema.json
-# Controller config for e2e against MinIO.
+# Same connection details as buckety-controller.yaml but with the
+# backend name changed from 's3' to 's3-renamed'. Used by the
+# s3/backend-stickiness scenario to prove status.backend stickiness
+# survives a config rename.
 backends:
 
-- name: s3
+- name: s3-renamed
   driver: s3
   config:
     implementation: minio
