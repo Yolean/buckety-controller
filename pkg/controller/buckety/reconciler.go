@@ -103,7 +103,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		bky.Status.DriverMajor = major
 		bky.Status.DriverBuildVersion = backend.Driver.Version()
 		bky.Status.BackendResourceName = resolved
-		if err := r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky)); err != nil {
+		// Update, not Patch: driverMajor stamped as 0 (any 0.x
+		// driver) is invisible to a merge diff against the
+		// zero-valued base, so a patch would never persist it.
+		if err := r.Status().Update(ctx, &bky); err != nil {
 			return ctrl.Result{}, err
 		}
 	}

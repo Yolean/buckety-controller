@@ -180,10 +180,22 @@ run_scenario() {
   log "=== scenario: $scenario -> $ns (impl=$impl) ==="
   kubectl create namespace "$ns" || return 1
 
-  kubectl apply -k "$scenario" -n "$ns" || {
-    log "scenario FAILED (apply): $scenario; namespace $ns left standing"
+  # Render first: config-only scenarios (misconfigured-startup)
+  # declare `resources: []` and apply nothing, which plain
+  # `kubectl apply -k` rejects with "no objects passed to apply".
+  local rendered
+  rendered="$(kubectl kustomize "$scenario")" || {
+    log "scenario FAILED (kustomize build): $scenario; namespace $ns left standing"
     return 1
   }
+  if [[ -n "${rendered//[$'\n\r\t ']/}" ]]; then
+    printf '%s\n' "$rendered" | kubectl apply -n "$ns" -f - || {
+      log "scenario FAILED (apply): $scenario; namespace $ns left standing"
+      return 1
+    }
+  else
+    log "scenario applies no namespaced resources (config-only)"
+  fi
 
   # </dev/null: assert.sh helpers use `kubectl run -i`, which would
   # otherwise forward and consume this shell's stdin. When stdin is

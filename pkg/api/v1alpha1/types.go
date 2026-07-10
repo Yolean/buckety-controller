@@ -102,8 +102,11 @@ type BucketyStatus struct {
 	Driver string `json:"driver,omitempty"`
 
 	// DriverMajor is the major SemVer of the driver at first
-	// reconcile. Gates compatibility. Sticky.
-	DriverMajor int `json:"driverMajor,omitempty"`
+	// reconcile. Gates compatibility. Sticky. No omitempty: 0 is a
+	// legitimate stamped value for 0.x drivers and must serialize,
+	// otherwise the field never reaches the API server (a merge
+	// patch of 0 -> 0 has no diff).
+	DriverMajor int `json:"driverMajor"`
 
 	// DriverBuildVersion is the full SemVer of the binary that
 	// most recently reconciled this resource. Informational.
