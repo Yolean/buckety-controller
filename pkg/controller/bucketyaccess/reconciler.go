@@ -157,6 +157,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
 	}
 
+	// Parameter validation, also done at admission when the webhook
+	// runs; admission additionally cannot resolve the driver when
+	// the Buckety does not exist yet, so this is the authoritative
+	// check for BucketyAccess parameters.
+	if err := backend.Driver.ValidateAccessParameters(access.Spec.Parameters); err != nil {
+		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), access.Generation)
+		return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+	}
+
 	res, err := backend.Driver.GrantAccess(ctx, registry.GrantRequest{
 		BucketyName: bky.Status.BackendResourceName,
 		Role:        string(access.Spec.Role),
@@ -184,6 +193,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return nil
 	})
 	if err != nil {
+		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			// The namespace is going away and will take this
+			// BucketyAccess with it; retrying with backoff only
+			// churns the workqueue and floods the log.
+			log.Info("secret write skipped; namespace is terminating")
+			return ctrl.Result{}, nil
+		}
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretWriteFailed", err.Error(), access.Generation)
 		_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
 		return ctrl.Result{}, err

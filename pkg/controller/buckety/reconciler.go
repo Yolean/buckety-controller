@@ -15,10 +15,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
@@ -38,12 +41,28 @@ type Reconciler struct {
 }
 
 // SetupWithManager registers the controller with the supplied
-// manager.
+// manager. The BucketyAccess watch maps every access event
+// (explicit or implicit) to its referenced Buckety; Owns() would
+// only cover the implicit access, leaving implicit-access
+// reclamation and deletion-unblock to the periodic requeue (up to
+// 5 minutes at the production cadence).
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bucketyv1.Buckety{}).
-		Owns(&bucketyv1.BucketyAccess{}).
+		Watches(&bucketyv1.BucketyAccess{}, handler.EnqueueRequestsFromMapFunc(r.accessToBuckety)).
 		Complete(r)
+}
+
+// accessToBuckety maps a BucketyAccess event to a reconcile request
+// for the Buckety it references in the same namespace.
+func (r *Reconciler) accessToBuckety(_ context.Context, obj client.Object) []reconcile.Request {
+	a, ok := obj.(*bucketyv1.BucketyAccess)
+	if !ok || a.Spec.BucketyRef.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: a.Namespace, Name: a.Spec.BucketyRef.Name,
+	}}}
 }
 
 // Reconcile is the controller-runtime entrypoint.
@@ -83,7 +102,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Snapshot for status patching; tolerates concurrent RV bumps
 	// (the access reconciler's reads, the implicit-access write
-	// re-enqueueing this Buckety via the Owns watch, etc.) that a
+	// re-enqueueing this Buckety via the access watch, etc.) that a
 	// .Status().Update() would conflict on.
 	baseBky := bky.DeepCopy()
 
@@ -96,6 +115,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		resolved, err := resolveName(&bky, backend)
 		if err != nil {
 			return r.surfaceCondition(ctx, &bky, baseBky, "Ready", metav1.ConditionFalse, "NameTemplate", err.Error())
+		}
+		// Admission rejects invalid resolved names when the webhook
+		// runs; this is the webhook-disabled fallback, checked
+		// before the name is frozen into status.
+		if err := backend.Driver.ValidateResourceName(resolved); err != nil {
+			return r.surfaceCondition(ctx, &bky, baseBky, "Ready", metav1.ConditionFalse, "NameInvalid", err.Error())
 		}
 		major, _ := majorOf(backend.Driver.Version())
 		bky.Status.Backend = backend.Name
@@ -131,6 +156,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	bky.Status.DriverBuildVersion = backend.Driver.Version()
 	meta.RemoveStatusCondition(&bky.Status.Conditions, "DriverVersionIncompatible")
 	meta.RemoveStatusCondition(&bky.Status.Conditions, "BackendUnavailable")
+
+	// Parameter validation, also done at admission when the webhook
+	// runs. Platforms without cert-manager run --enable-webhook=false
+	// (docs/SCAFFOLDING.md "Webhook TLS"); this is the promised
+	// fallback that surfaces invalid parameters on status instead of
+	// letting them travel to the backend as an opaque driver error.
+	if err := backend.Driver.ValidateParameters(bky.Spec.Parameters); err != nil {
+		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), bky.Generation)
+		setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "InvalidParameters", "spec change required", bky.Generation)
+		return ctrl.Result{}, r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
+	}
 
 	// Reconcile the backend resource itself.
 	setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionTrue, "Ensuring", "calling driver.EnsureBuckety", bky.Generation)
@@ -196,17 +232,35 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		if err := r.Status().Patch(ctx, bky, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Requeue periodically; the BucketyAccess deletions will
-		// also re-enqueue this Buckety via the Owns watch.
+		// Requeue periodically; the BucketyAccess deletions also
+		// re-enqueue this Buckety via the access watch.
 		if r.RequeueAfter != nil {
 			return r.RequeueAfter(), nil
 		}
 		return ctrl.Result{}, nil
 	}
 
-	// If we have a backend AND the policy says Delete, drop the
-	// backing resource.
-	if backendOK && bky.Spec.RetentionPolicy == bucketyv1.RetentionDelete && bky.Status.BackendResourceName != "" {
+	// retentionPolicy=Delete blocks on DeleteBuckety succeeding
+	// (SPEC "Lifecycle and deletion"). With the backend missing from
+	// config that is impossible, and letting the finalizer go would
+	// silently orphan the backend resource - so deletion blocks
+	// until the maintainer restores the backend or the user flips
+	// retentionPolicy to Retain (mutable).
+	if bky.Spec.RetentionPolicy == bucketyv1.RetentionDelete && bky.Status.BackendResourceName != "" {
+		if !backendOK {
+			setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
+				fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q; restore the backend in buckety-controller.yaml or set retentionPolicy=Retain",
+					bky.Spec.Backend, bky.Status.BackendResourceName),
+				bky.Generation)
+			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", "deletion blocked", bky.Generation)
+			if err := r.Status().Patch(ctx, bky, client.MergeFrom(base)); err != nil {
+				return ctrl.Result{}, err
+			}
+			if r.RequeueAfter != nil {
+				return r.RequeueAfter(), nil
+			}
+			return ctrl.Result{}, nil
+		}
 		if err := backend.Driver.DeleteBuckety(ctx, bky.Status.BackendResourceName); err != nil {
 			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DeleteFailed", err.Error(), bky.Generation)
 			_ = r.Status().Patch(ctx, bky, client.MergeFrom(base))
