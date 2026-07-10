@@ -7,8 +7,12 @@
 # locally and in CI.
 name: e2e
 
+# push limited to main: PR branches otherwise run every commit
+# twice (push + pull_request), and the two ~20min runs of the same
+# sha can flake independently, which reads as a contradiction.
 on:
-  push: {}
+  push:
+    branches: [main]
   pull_request: {}
   workflow_dispatch: {}
 
