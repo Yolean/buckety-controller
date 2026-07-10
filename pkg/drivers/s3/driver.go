@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -39,7 +40,7 @@ const DriverName = "s3"
 var version = "0.1.0"
 
 func init() {
-	registry.Register(DriverName, factory)
+	registry.Register(DriverName, version, factory)
 }
 
 // Config is the typed shape of the `config:` block under an s3
@@ -110,12 +111,13 @@ func (d *Driver) Name() string    { return DriverName }
 func (d *Driver) Version() string { return version }
 
 // EnsureBuckety creates the backend bucket. Idempotent on
-// BucketAlreadyOwnedByYou (and on BucketAlreadyExists, which on
-// most S3 implementations means the caller already owns the
-// bucket within the same account; on AWS it indicates a global
-// name collision and is treated identically here because by the
-// time we re-reconcile, head-bucket will determine whether we
-// can actually see it).
+// BucketAlreadyOwnedByYou. BucketAlreadyExists is ambiguous: most
+// non-AWS implementations surface it for a caller-owned bucket,
+// but on AWS proper it can mean a global-namespace collision with
+// a foreign account. HeadBucket disambiguates: accessible with
+// this backend's credentials means ours, anything else is a hard
+// error rather than a false Ready=True over a bucket the consumer
+// cannot use.
 //
 // v1alpha1 has no driver-known mutable parameters for S3 buckets;
 // EnsureBuckety is a create-or-noop. Capability-gated parameters
@@ -128,10 +130,13 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 		input.CreateBucketConfiguration = cfg
 	}
 	_, err := d.client.CreateBucket(ctx, input)
-	if err == nil {
+	if err == nil || isAlreadyOwnedByYou(err) {
 		return nil
 	}
-	if isAlreadyOwned(err) {
+	if isAlreadyExists(err) {
+		if _, herr := d.client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(req.Name)}); herr != nil {
+			return fmt.Errorf("s3: bucket %q exists but is not accessible with this backend's credentials (name likely taken by another account): %w", req.Name, herr)
+		}
 		return nil
 	}
 	return fmt.Errorf("s3: create bucket %q: %w", req.Name, err)
@@ -229,6 +234,36 @@ func (d *Driver) ValidateAccessParameters(params map[string]string) error {
 		strings.Join(keys, ", "))
 }
 
+// bucketNameRE covers S3's core charset rule: lowercase
+// alphanumerics, dots and hyphens, starting and ending
+// alphanumeric.
+var bucketNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`)
+
+// ipLikeRE matches dotted-quad shapes, which S3 forbids as bucket
+// names.
+var ipLikeRE = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}$`)
+
+// ValidateResourceName enforces the core S3 bucket naming rules on
+// the resolved spec.name template result. Individual backends may
+// impose more (AWS reserves prefixes like xn-- and suffixes like
+// --ol-s3); those surface as EnsureBuckety errors rather than being
+// duplicated here.
+func (d *Driver) ValidateResourceName(name string) error {
+	if len(name) < 3 || len(name) > 63 {
+		return fmt.Errorf("bucket name %q is %d characters; S3 requires 3-63", name, len(name))
+	}
+	if !bucketNameRE.MatchString(name) {
+		return fmt.Errorf("bucket name %q must be lowercase alphanumerics, dots and hyphens, starting and ending alphanumeric", name)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("bucket name %q must not contain two adjacent periods", name)
+	}
+	if ipLikeRE.MatchString(name) {
+		return fmt.Errorf("bucket name %q must not be formatted as an IP address", name)
+	}
+	return nil
+}
+
 // ---- internals ----
 
 // bucketCreationConfig translates per-Buckety parameters into the
@@ -264,31 +299,25 @@ func bucketCreationConfig(impl, region string, params map[string]string) *s3type
 	return nil
 }
 
-// isAlreadyOwned reports whether err is the S3 service signalling
-// that the bucket already exists and is owned by the caller. We
-// treat both BucketAlreadyOwnedByYou and BucketAlreadyExists as
-// idempotent success: BucketAlreadyExists on AWS proper means a
-// global name collision, but on most other S3 implementations
-// (MinIO, VersityGW, R2 within an account) it surfaces for a
-// caller-owned bucket too and the next reconcile's drift check
-// will catch a genuinely foreign bucket via HeadBucket.
-func isAlreadyOwned(err error) bool {
+// isAlreadyOwnedByYou reports the unambiguous caller-owned case.
+func isAlreadyOwnedByYou(err error) bool {
 	var ae *s3types.BucketAlreadyOwnedByYou
 	if errors.As(err, &ae) {
 		return true
 	}
+	var api smithy.APIError
+	return errors.As(err, &api) && api.ErrorCode() == "BucketAlreadyOwnedByYou"
+}
+
+// isAlreadyExists reports the ambiguous name-taken case; the caller
+// must disambiguate ownership (see EnsureBuckety's HeadBucket).
+func isAlreadyExists(err error) bool {
 	var ex *s3types.BucketAlreadyExists
 	if errors.As(err, &ex) {
 		return true
 	}
 	var api smithy.APIError
-	if errors.As(err, &api) {
-		switch api.ErrorCode() {
-		case "BucketAlreadyOwnedByYou", "BucketAlreadyExists":
-			return true
-		}
-	}
-	return false
+	return errors.As(err, &api) && api.ErrorCode() == "BucketAlreadyExists"
 }
 
 // isNotFound reports whether err is the S3 service signalling a

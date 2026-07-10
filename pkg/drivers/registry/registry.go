@@ -62,8 +62,18 @@ type Driver interface {
 	ValidateUpdateParameters(old, new map[string]string) error
 
 	// ValidateAccessParameters validates BucketyAccess.spec.parameters.
-	// Most drivers accept empty parameters in v1alpha1.
+	// Most drivers accept empty parameters in v1alpha1. Called by
+	// the BucketyAccess reconciler before GrantAccess; admission
+	// cannot resolve the driver when the Buckety does not exist yet.
 	ValidateAccessParameters(params map[string]string) error
+
+	// ValidateResourceName reports whether a resolved spec.name
+	// template result is a legal backend resource name for this
+	// driver (Kafka topic name rules, S3 bucket name rules, ...).
+	// Per SPEC "Naming templates", a template that resolves to an
+	// invalid backend name is rejected at admission; the reconciler
+	// re-checks before stamping for webhook-disabled deployments.
+	ValidateResourceName(name string) error
 }
 
 // EnsureRequest carries the resolved spec the controller has
@@ -138,18 +148,22 @@ func IsParameterDrift(err error) bool {
 var (
 	mu        sync.RWMutex
 	factories = map[string]Factory{}
+	versions  = map[string]string{}
 )
 
-// Register adds a driver factory under name. Intended for init().
-// Panics on duplicate name -- the binary's driver list is
-// compile-time, so a duplicate is a programmer error.
-func Register(name string, f Factory) {
+// Register adds a driver factory under name, with the driver's
+// running SemVer (the package version var, already ldflags-injected
+// by init() time). Intended for init(). Panics on duplicate name --
+// the binary's driver list is compile-time, so a duplicate is a
+// programmer error.
+func Register(name, version string, f Factory) {
 	mu.Lock()
 	defer mu.Unlock()
 	if _, dup := factories[name]; dup {
 		panic(fmt.Sprintf("driver %q already registered", name))
 	}
 	factories[name] = f
+	versions[name] = version
 }
 
 // Lookup returns the factory for name, or false if unknown.
@@ -168,6 +182,18 @@ func Names() []string {
 	out := make([]string, 0, len(factories))
 	for k := range factories {
 		out = append(out, k)
+	}
+	return out
+}
+
+// Versions returns registered driver names mapped to their running
+// SemVer, for startup logging and --version output.
+func Versions() map[string]string {
+	mu.RLock()
+	defer mu.RUnlock()
+	out := make(map[string]string, len(versions))
+	for k, v := range versions {
+		out[k] = v
 	}
 	return out
 }

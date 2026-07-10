@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -33,7 +34,7 @@ const DriverName = "kadm"
 var version = "0.1.0"
 
 func init() {
-	registry.Register(DriverName, factory)
+	registry.Register(DriverName, version, factory)
 }
 
 func factory(raw json.RawMessage) (registry.Driver, error) {
@@ -168,6 +169,29 @@ func (d *Driver) ValidateUpdateParameters(oldParams, newParams map[string]string
 	// failing the apply.
 	if o, n := oldParams["replicationFactor"], newParams["replicationFactor"]; o != n {
 		return fmt.Errorf("parameters.replicationFactor is immutable post-create (current=%q, requested=%q); Kafka cannot reassign partitions without explicit kafka-reassign-partitions tooling", o, n)
+	}
+	return nil
+}
+
+// topicNameRE is the Kafka-legal topic charset. Kafka additionally
+// warns about mixing '.' and '_' (metric-name collisions) but does
+// not reject it; neither do we.
+var topicNameRE = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// ValidateResourceName enforces Kafka topic naming rules on the
+// resolved spec.name template result.
+func (d *Driver) ValidateResourceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("topic name is empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("topic name %q is reserved", name)
+	}
+	if len(name) > 249 {
+		return fmt.Errorf("topic name is %d characters; Kafka's limit is 249", len(name))
+	}
+	if !topicNameRE.MatchString(name) {
+		return fmt.Errorf("topic name %q contains characters outside [a-zA-Z0-9._-]", name)
 	}
 	return nil
 }

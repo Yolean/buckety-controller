@@ -12,7 +12,8 @@
 // surfaced as an error so the admission webhook can reject the
 // resource. A template that resolves successfully but produces a
 // name the driver rejects is also caught at admission, by the
-// driver's name-validation hook (out of scope here).
+// driver's ValidateResourceName (pkg/drivers/registry.Driver);
+// the reconciler re-checks it for webhook-disabled deployments.
 package template
 
 import (
