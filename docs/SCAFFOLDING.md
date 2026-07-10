@@ -106,10 +106,13 @@ not a contract.
 | `kadm` | redpanda |
 | `s3`   | versitygw, minio |
 
-Per SPEC.md §E2E harness. Adding R2 to CI requires Cloudflare
-credentials (R2-specific scenario today asserts admission only;
-real-R2 provisioning lives in a manual recipe under
-`examples/s3/r2/manual/` once a follow-up adds it).
+Per SPEC.md §E2E harness. The jurisdiction capability gate is
+asserted from every s3 implementation in the matrix
+(`examples/s3/jurisdiction-gating/`; the decision reads config
+discriminators, not the backing service). Adding real R2 to CI
+requires Cloudflare credentials; real-R2 provisioning lives in a
+manual recipe under `examples/s3/r2/manual/` once a follow-up
+adds it.
 
 ## What lives where
 

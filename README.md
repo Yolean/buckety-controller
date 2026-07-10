@@ -4,10 +4,12 @@ A small in-cluster operator that provisions named resources on
 backing services (Kafka topics, S3 buckets) and mints
 `secretKeyRef`-friendly credentials Secrets for consumers.
 
-> **Status: v1alpha1 contract; controller implementation
-> pending.** The API and driver semantics in this README and
-> [`SPEC.md`](./SPEC.md) are the surface currently under review.
-> No release artefacts exist yet.
+> **Status: v1alpha1 shipped.** Both drivers (`kadm`, `s3`) are
+> implemented and covered by the e2e suite in CI. Every commit on
+> `main` pins a reproducible image build in
+> [`deploy/kustomize/release/`](./deploy/kustomize/release), and
+> the same digest is pushed to `ghcr.io/yolean/buckety-controller`
+> on merge.
 
 This README is for **cluster maintainers** — the person deploying
 and configuring the controller. End-user examples for consumers
@@ -84,24 +86,20 @@ with one of them, please file an issue.
 ## Install
 
 The operator publishes a kustomize "release" base alongside its
-container image. Every tagged release of `Yolean/buckety-controller`
-generates a `deploy/kustomize/release/` directory in the repo
-with the image already pinned by digest — the same digest the
-GHA workflow pushed to `ghcr.io/yolean/buckety-controller`. The
-build is reproducible: image and base ship together.
-
-> **Pre-v0.1.0 installs.** Until the first tagged release,
-> `deploy/kustomize/release/` does not exist. Vendor from
-> `deploy/kustomize/base/` instead and pin the image yourself
-> via your overlay's `images:` field. Migrate to the release
-> base when v0.1.0 ships.
+container image. Every commit on `main` carries a
+`deploy/kustomize/release/` directory with the image pinned by
+digest — CI rebuilds from source and asserts the pinned digest
+matches before the publish job pushes that exact image to
+`ghcr.io/yolean/buckety-controller`. The build is reproducible:
+image and base ship together, and the pin in the commit you
+vendor is the digest that was e2e-tested.
 
 Vendor the release base into your platform repo:
 
 ```text
 # your-platform/buckety-controller/upstream/
-# Copy from Yolean/buckety-controller@<tag>:deploy/kustomize/release/.
-# Refresh by re-copying when you bump to a newer tag.
+# Copy from Yolean/buckety-controller@<commit>:deploy/kustomize/release/.
+# Refresh by re-copying when you bump to a newer commit.
 ```
 
 Then overlay it with namespace and your config:
@@ -215,12 +213,18 @@ types using the y-cluster schema toolchain:
   the controller's admission webhook).
 
 Schemas are published at stable GitHub raw URLs under
-`pkg/drivers/<driver>/schema/`. Add a header to your config file
-so your editor validates as you type:
+`pkg/drivers/<driver>/schema/`. For the config file as a whole
+(the `backends:` list shape), a third schema lives at
+`pkg/config/schema/buckety-controller.schema.json`. Add a header
+to your config file so your editor validates as you type:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/v0.1.0/pkg/drivers/kadm/schema/v0.1/config.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/pkg/config/schema/buckety-controller.schema.json
 ```
+
+The per-driver schemas describe each backend's `config:` block and
+the `spec.parameters` shape; the controller enforces both at
+startup and at admission regardless of editor support.
 
 ## Use (consumer view)
 
