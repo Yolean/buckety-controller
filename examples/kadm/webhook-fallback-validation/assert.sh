@@ -54,12 +54,14 @@ if kc get secret/bad-access >/dev/null 2>&1; then
 fi
 
 restore
-# Prove admission is back before later scenarios rely on it: an
-# invalid apply must be rejected again (propagation can lag a
-# moment after the configuration reappears).
+# Prove admission is back before later scenarios rely on it: a
+# fresh invalid CREATE must be rejected again (propagation can lag
+# a moment after the configuration reappears). create, not apply:
+# apply of the unchanged existing object computes an empty patch
+# client-side and never reaches admission at all.
 rejected=""
 for _ in $(seq 1 10); do
-  if ! kc apply -f "$dir/invalid-params.yaml" --dry-run=server >/dev/null 2>&1; then
+  if ! kc create --dry-run=server -f "$dir/resume-probe.yaml" >/dev/null 2>&1; then
     rejected=yes
     break
   fi
