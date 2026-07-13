@@ -2,12 +2,19 @@
 set -euo pipefail
 . "${E2E_LIB:-$(cd "$(dirname "$0")/../../../test/e2e" && pwd)}/lib.sh"
 
-: "${E2E_VERSION_BASE:?harness must set, e.g. 0.1.0}"
-: "${E2E_VERSION_PATCH:?harness must set, e.g. 0.1.1}"
-: "${E2E_VERSION_MAJOR:?harness must set, e.g. 1.0.0}"
-: "${E2E_IMAGE_BASE:?harness must set: image ref that builds with E2E_VERSION_BASE}"
-: "${E2E_IMAGE_PATCH:?}"
-: "${E2E_IMAGE_MAJOR:?}"
+# This scenario needs three controller images with rotated driver
+# versions (see .github/workflows/e2e.yaml "rotation images" step
+# for the build recipe). Without them there is nothing meaningful
+# to assert - switching the Deployment to a nonexistent image would
+# wedge the controller for every scenario after this one - so skip
+# loudly rather than fail.
+if [[ -z "${E2E_IMAGE_BASE:-}" || -z "${E2E_IMAGE_PATCH:-}" || -z "${E2E_IMAGE_MAJOR:-}" ]]; then
+  log "driver-version SKIPPED: E2E_IMAGE_BASE/PATCH/MAJOR not set (CI provides these; build rotated images to run locally)"
+  exit 0
+fi
+: "${E2E_VERSION_BASE:?must be set alongside E2E_IMAGE_BASE, e.g. 0.1.0}"
+: "${E2E_VERSION_PATCH:?must be set alongside E2E_IMAGE_PATCH, e.g. 0.1.1}"
+: "${E2E_VERSION_MAJOR:?must be set alongside E2E_IMAGE_MAJOR, e.g. 1.0.0}"
 
 set_image() {
   local img="$1"

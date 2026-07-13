@@ -103,14 +103,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		bky.Status.DriverMajor = major
 		bky.Status.DriverBuildVersion = backend.Driver.Version()
 		bky.Status.BackendResourceName = resolved
-		if err := r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky)); err != nil {
+		// Update, not Patch: driverMajor stamped as 0 (any 0.x
+		// driver) is invisible to a merge diff against the
+		// zero-valued base, so a patch would never persist it.
+		if err := r.Status().Update(ctx, &bky); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
-	// Drift on driver major after stickiness.
+	// Drift on driver major after stickiness. Stampedness is
+	// signalled by status.backend (set together with driverMajor at
+	// first reconcile): 0 is a legitimate stamped major for 0.x
+	// drivers, so `driverMajor != 0` cannot be the guard - it would
+	// exempt every pre-1.0 resource from the compatibility check.
 	runningMajor, _ := majorOf(backend.Driver.Version())
-	if bky.Status.DriverMajor != 0 && runningMajor != bky.Status.DriverMajor {
+	if bky.Status.Backend != "" && runningMajor != bky.Status.DriverMajor {
 		setCond(&bky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue,
 			"DriverMajorBump",
 			fmt.Sprintf("stamped major=%d, running=%d; pin a compatible binary or migrate the resource", bky.Status.DriverMajor, runningMajor),

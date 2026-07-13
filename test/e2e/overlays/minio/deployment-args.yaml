@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buckety-controller
+spec:
+  template:
+    spec:
+      containers:
+      - name: controller
+        # Fast drift re-check for e2e: the oob-drift scenarios wait
+        # 90-300s for the periodic reconcile to repair out-of-band
+        # changes, which the production default of 5m never meets.
+        args:
+        - "-c"
+        - "/etc/buckety"
+        - "--periodic-recheck=15s"

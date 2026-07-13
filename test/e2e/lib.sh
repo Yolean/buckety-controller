@@ -70,22 +70,59 @@ secret_value() {
   kc get "secret/$1" -o "jsonpath={.data.$2}" | base64 -d
 }
 
+# rpk_topic_list [kafka-namespace] [bootstrap-svc]
+# Prints `rpk topic list` output via an ephemeral rpk pod. Output
+# is captured, not piped: under `set -o pipefail` an early `grep -q`
+# exit SIGPIPEs kubectl and fails the pipeline even on a match.
+rpk_topic_list() {
+  local kns="${1:-${E2E_KAFKA_NAMESPACE:-redpanda}}"
+  local bootstrap="${2:-${E2E_KAFKA_BOOTSTRAP:-redpanda.${kns}.svc.cluster.local:9093}}"
+  # ghcr.io/yolean/redpanda's ENTRYPOINT is rpk; pass args
+  # without the leading `rpk` to avoid `rpk rpk topic ...`.
+  kcg run -n "$kns" --rm -i --restart=Never --quiet \
+    --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
+    "rpk-check-$RANDOM" -- \
+    topic list --brokers "$bootstrap" </dev/null 2>&1
+}
+
 # kafka_topic_exists <topic> [kafka-namespace] [bootstrap-svc]
-# Verifies the topic exists on the broker via an ephemeral rpk pod.
-# The harness sideloads a redpanda-equipped image as `e2e-rpk:latest`.
+# Polls until the topic appears on the broker. Topic creation is
+# acked before a fresh metadata request necessarily lists it, so a
+# single-shot check flakes (seen on retention-policy in CI).
 kafka_topic_exists() {
   local topic="$1"
   local kns="${2:-${E2E_KAFKA_NAMESPACE:-redpanda}}"
   local bootstrap="${3:-${E2E_KAFKA_BOOTSTRAP:-redpanda.${kns}.svc.cluster.local:9093}}"
   log "verifying Kafka topic '$topic' on $bootstrap"
-  # ghcr.io/yolean/redpanda's ENTRYPOINT is rpk; pass args
-  # without the leading `rpk` to avoid `rpk rpk topic ...`.
-  if ! kcg run -n "$kns" --rm -i --restart=Never --quiet \
-      --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
-      "rpk-check-$RANDOM" -- \
-      topic list --brokers "$bootstrap" 2>/dev/null | grep -qE "^\s*$topic\s"; then
-    fail "Kafka topic '$topic' not found on $bootstrap"
-  fi
+  local out=""
+  for _ in $(seq 1 6); do
+    if out="$(rpk_topic_list "$kns" "$bootstrap")" \
+        && grep -qE "^[[:space:]]*${topic}[[:space:]]" <<<"$out"; then
+      return 0
+    fi
+    sleep 5
+  done
+  printf '%s\n' "$out" >&2
+  fail "Kafka topic '$topic' not found on $bootstrap"
+}
+
+# kafka_topic_absent <topic> [kafka-namespace] [bootstrap-svc]
+# Polls until the topic no longer appears on the broker.
+kafka_topic_absent() {
+  local topic="$1"
+  local kns="${2:-${E2E_KAFKA_NAMESPACE:-redpanda}}"
+  local bootstrap="${3:-${E2E_KAFKA_BOOTSTRAP:-redpanda.${kns}.svc.cluster.local:9093}}"
+  log "verifying Kafka topic '$topic' is gone from $bootstrap"
+  local out=""
+  for _ in $(seq 1 6); do
+    if out="$(rpk_topic_list "$kns" "$bootstrap")" \
+        && ! grep -qE "^[[:space:]]*${topic}[[:space:]]" <<<"$out"; then
+      return 0
+    fi
+    sleep 5
+  done
+  printf '%s\n' "$out" >&2
+  fail "Kafka topic '$topic' still present on $bootstrap"
 }
 
 # s3_bucket_exists <bucket> <endpoint> <access> <secret>
@@ -93,12 +130,14 @@ kafka_topic_exists() {
 s3_bucket_exists() {
   local bucket="$1" endpoint="$2" access="$3" secret="$4"
   log "verifying S3 bucket '$bucket' at $endpoint"
-  if ! kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+  local out
+  if ! out="$(kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
       --image=public.ecr.aws/aws-cli/aws-cli:latest \
       --env="AWS_ACCESS_KEY_ID=$access" \
       --env="AWS_SECRET_ACCESS_KEY=$secret" \
       "awscli-check-$RANDOM" -- \
-      s3api head-bucket --bucket "$bucket" --endpoint-url "$endpoint" >/dev/null 2>&1; then
+      s3api head-bucket --bucket "$bucket" --endpoint-url "$endpoint" </dev/null 2>&1)"; then
+    printf '%s\n' "$out" >&2
     fail "S3 bucket '$bucket' not found at $endpoint"
   fi
 }

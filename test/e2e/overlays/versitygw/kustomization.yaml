@@ -14,3 +14,7 @@ patches:
   target:
     kind: Deployment
     name: buckety-controller
+- path: deployment-args.yaml
+  target:
+    kind: Deployment
+    name: buckety-controller

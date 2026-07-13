@@ -9,3 +9,8 @@ secretGenerator:
   - buckety-controller.yaml
 generatorOptions:
   disableNameSuffixHash: true
+patches:
+- path: deployment-args.yaml
+  target:
+    kind: Deployment
+    name: buckety-controller

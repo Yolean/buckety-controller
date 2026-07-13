@@ -22,13 +22,6 @@ kafka_topic_exists "$keep_topic"
 log "deleting Buckety/drop-me (Delete)"
 kc delete buckety/drop-me --wait=true --timeout=60s
 resource_absent secret/drop-me-topic 30s
-log "verifying topic '$drop_topic' was removed from broker"
-if kcg run -n "${E2E_KAFKA_NAMESPACE:-redpanda}" --rm -i --restart=Never --quiet \
-    --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
-    "rpk-deleted-$RANDOM" -- \
-    topic list --brokers "${E2E_KAFKA_BOOTSTRAP:-redpanda.redpanda.svc.cluster.local:9093}" 2>/dev/null \
-    | grep -qE "^\s*$drop_topic\s"; then
-  fail "topic '$drop_topic' still present after Buckety with retentionPolicy=Delete was deleted"
-fi
+kafka_topic_absent "$drop_topic"
 
 log "retention-policy PASS"

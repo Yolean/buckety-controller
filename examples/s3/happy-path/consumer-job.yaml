@@ -28,4 +28,5 @@ spec:
           echo "hello-buckety" > /tmp/object.txt
           aws s3 cp /tmp/object.txt "s3://$BUCKETY_BUCKET/probe.txt"
           aws s3 cp "s3://$BUCKETY_BUCKET/probe.txt" /tmp/back.txt
-          diff /tmp/object.txt /tmp/back.txt
+          # No diff/cmp in the aws-cli image; compare via the shell.
+          [ "$(cat /tmp/object.txt)" = "$(cat /tmp/back.txt)" ]
