@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dial-tone-roundtrip
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: roundtrip
+        image: public.ecr.aws/aws-cli/aws-cli:latest
+        env:
+        - name: AWS_ENDPOINT_URL
+          valueFrom: { secretKeyRef: { name: dial-tone-bucket, key: endpoint } }
+        - name: BUCKETY_BUCKET
+          valueFrom: { secretKeyRef: { name: dial-tone-bucket, key: bucket } }
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom: { secretKeyRef: { name: dial-tone-bucket, key: accessKeyID } }
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom: { secretKeyRef: { name: dial-tone-bucket, key: secretAccessKey } }
+        - name: AWS_REGION
+          value: "us-east-1"
+        command: [sh, -ec]
+        args:
+        - |
+          set -e
+          echo "operator-down test: put/get on $BUCKETY_BUCKET"
+          echo "hello-from-the-dark" > /tmp/object.txt
+          aws s3 cp /tmp/object.txt "s3://$BUCKETY_BUCKET/dial-tone.txt"
+          aws s3 cp "s3://$BUCKETY_BUCKET/dial-tone.txt" /tmp/back.txt
+          # No diff/cmp in the aws-cli image; compare via the shell.
+          [ "$(cat /tmp/object.txt)" = "$(cat /tmp/back.txt)" ]

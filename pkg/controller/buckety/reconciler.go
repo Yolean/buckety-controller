@@ -15,10 +15,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
@@ -35,15 +41,50 @@ type Reconciler struct {
 	Config         *config.Loaded
 	RequeueAfter   func() ctrl.Result // periodic re-check cadence; injected so tests can stub
 	ControllerName string             // for ownership references on implicit BucketyAccess
+	// Recorder emits Events alongside condition changes so
+	// `kubectl describe` tells the story; nil disables (tests).
+	Recorder record.EventRecorder
+}
+
+// eventIfTransition emits an Event only when the condition's
+// (status, reason) pair differs from the pre-reconcile state, so
+// steady-state requeues do not spam the event stream. Reason is
+// part of the comparison: Ready staying False while its reason
+// moves (e.g. WaitingForBuckety to SecretConflict) is a
+// transition users need to see.
+func (r *Reconciler) eventIfTransition(obj runtime.Object, baseConds []metav1.Condition, condType string, status metav1.ConditionStatus, condReason, eventType, eventReason, message string) {
+	if r.Recorder == nil {
+		return
+	}
+	if c := meta.FindStatusCondition(baseConds, condType); c != nil && c.Status == status && c.Reason == condReason {
+		return
+	}
+	r.Recorder.Event(obj, eventType, eventReason, message)
 }
 
 // SetupWithManager registers the controller with the supplied
-// manager.
+// manager. The BucketyAccess watch maps every access event
+// (explicit or implicit) to its referenced Buckety; Owns() would
+// only cover the implicit access, leaving implicit-access
+// reclamation and deletion-unblock to the periodic requeue (up to
+// 5 minutes at the production cadence).
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bucketyv1.Buckety{}).
-		Owns(&bucketyv1.BucketyAccess{}).
+		Watches(&bucketyv1.BucketyAccess{}, handler.EnqueueRequestsFromMapFunc(r.accessToBuckety)).
 		Complete(r)
+}
+
+// accessToBuckety maps a BucketyAccess event to a reconcile request
+// for the Buckety it references in the same namespace.
+func (r *Reconciler) accessToBuckety(_ context.Context, obj client.Object) []reconcile.Request {
+	a, ok := obj.(*bucketyv1.BucketyAccess)
+	if !ok || a.Spec.BucketyRef.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: a.Namespace, Name: a.Spec.BucketyRef.Name,
+	}}}
 }
 
 // Reconcile is the controller-runtime entrypoint.
@@ -83,7 +124,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Snapshot for status patching; tolerates concurrent RV bumps
 	// (the access reconciler's reads, the implicit-access write
-	// re-enqueueing this Buckety via the Owns watch, etc.) that a
+	// re-enqueueing this Buckety via the access watch, etc.) that a
 	// .Status().Update() would conflict on.
 	baseBky := bky.DeepCopy()
 
@@ -96,6 +137,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		resolved, err := resolveName(&bky, backend)
 		if err != nil {
 			return r.surfaceCondition(ctx, &bky, baseBky, "Ready", metav1.ConditionFalse, "NameTemplate", err.Error())
+		}
+		// Admission rejects invalid resolved names when the webhook
+		// runs; this is the webhook-disabled fallback, checked
+		// before the name is frozen into status.
+		if err := backend.Driver.ValidateResourceName(resolved); err != nil {
+			return r.surfaceCondition(ctx, &bky, baseBky, "Ready", metav1.ConditionFalse, "NameInvalid", err.Error())
 		}
 		major, _ := majorOf(backend.Driver.Version())
 		bky.Status.Backend = backend.Name
@@ -118,6 +165,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// exempt every pre-1.0 resource from the compatibility check.
 	runningMajor, _ := majorOf(backend.Driver.Version())
 	if bky.Status.Backend != "" && runningMajor != bky.Status.DriverMajor {
+		r.eventIfTransition(&bky, baseBky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue, "DriverMajorBump",
+			corev1.EventTypeWarning, "DriverVersionIncompatible",
+			fmt.Sprintf("stamped major=%d, running=%d; reconcile paused", bky.Status.DriverMajor, runningMajor))
 		setCond(&bky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue,
 			"DriverMajorBump",
 			fmt.Sprintf("stamped major=%d, running=%d; pin a compatible binary or migrate the resource", bky.Status.DriverMajor, runningMajor),
@@ -132,6 +182,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	meta.RemoveStatusCondition(&bky.Status.Conditions, "DriverVersionIncompatible")
 	meta.RemoveStatusCondition(&bky.Status.Conditions, "BackendUnavailable")
 
+	// Parameter validation, also done at admission when the webhook
+	// runs. Platforms without cert-manager run --enable-webhook=false
+	// (docs/SCAFFOLDING.md "Webhook TLS"); this is the promised
+	// fallback that surfaces invalid parameters on status instead of
+	// letting them travel to the backend as an opaque driver error.
+	if err := backend.Driver.ValidateParameters(bky.Spec.Parameters); err != nil {
+		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters",
+			corev1.EventTypeWarning, "InvalidParameters", err.Error())
+		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), bky.Generation)
+		setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "InvalidParameters", "spec change required", bky.Generation)
+		return ctrl.Result{}, r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
+	}
+
 	// Reconcile the backend resource itself.
 	setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionTrue, "Ensuring", "calling driver.EnsureBuckety", bky.Generation)
 	if err := backend.Driver.EnsureBuckety(ctx, registry.EnsureRequest{
@@ -139,12 +202,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		Parameters: bky.Spec.Parameters,
 	}); err != nil {
 		if registry.IsParameterDrift(err) {
+			r.eventIfTransition(&bky, baseBky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable",
+				corev1.EventTypeWarning, "ParameterDrift", err.Error())
 			setCond(&bky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable", err.Error(), bky.Generation)
 			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterDrift", err.Error(), bky.Generation)
 			setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Paused", "drift requires human resolution", bky.Generation)
 			return ctrl.Result{}, r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
 		}
 		log.Error(err, "driver.EnsureBuckety failed")
+		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed",
+			corev1.EventTypeWarning, "EnsureFailed", err.Error())
 		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed", err.Error(), bky.Generation)
 		_ = r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
 		return ctrl.Result{}, err
@@ -158,6 +225,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// All done.
+	r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionTrue, "EnsuredOnBackend",
+		corev1.EventTypeNormal, "Provisioned",
+		fmt.Sprintf("backend resource %q ensured on backend %q", bky.Status.BackendResourceName, bky.Status.Backend))
 	setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Idle", "", bky.Generation)
 	setCond(&bky.Status.Conditions, "Ready", metav1.ConditionTrue, "EnsuredOnBackend", "", bky.Generation)
 	bky.Status.ObservedGeneration = bky.Generation
@@ -190,24 +260,50 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		blocking = append(blocking, a.Name)
 	}
 	if len(blocking) > 0 {
+		r.eventIfTransition(bky, base.Status.Conditions, "BlockedByAccesses", metav1.ConditionTrue, "Pending",
+			corev1.EventTypeWarning, "BlockedByAccesses",
+			fmt.Sprintf("deletion waits on BucketyAccess: %s", strings.Join(blocking, ", ")))
 		setCond(&bky.Status.Conditions, "BlockedByAccesses", metav1.ConditionTrue, "Pending",
 			fmt.Sprintf("waiting on BucketyAccess: %s", strings.Join(blocking, ", ")),
 			bky.Generation)
 		if err := r.Status().Patch(ctx, bky, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Requeue periodically; the BucketyAccess deletions will
-		// also re-enqueue this Buckety via the Owns watch.
+		// Requeue periodically; the BucketyAccess deletions also
+		// re-enqueue this Buckety via the access watch.
 		if r.RequeueAfter != nil {
 			return r.RequeueAfter(), nil
 		}
 		return ctrl.Result{}, nil
 	}
 
-	// If we have a backend AND the policy says Delete, drop the
-	// backing resource.
-	if backendOK && bky.Spec.RetentionPolicy == bucketyv1.RetentionDelete && bky.Status.BackendResourceName != "" {
+	// retentionPolicy=Delete blocks on DeleteBuckety succeeding
+	// (SPEC "Lifecycle and deletion"). With the backend missing from
+	// config that is impossible, and letting the finalizer go would
+	// silently orphan the backend resource - so deletion blocks
+	// until the maintainer restores the backend or the user flips
+	// retentionPolicy to Retain (mutable).
+	if bky.Spec.RetentionPolicy == bucketyv1.RetentionDelete && bky.Status.BackendResourceName != "" {
+		if !backendOK {
+			r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
+				corev1.EventTypeWarning, "DeletionBlocked",
+				fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q", bky.Spec.Backend, bky.Status.BackendResourceName))
+			setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
+				fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q; restore the backend in buckety-controller.yaml or set retentionPolicy=Retain",
+					bky.Spec.Backend, bky.Status.BackendResourceName),
+				bky.Generation)
+			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", "deletion blocked", bky.Generation)
+			if err := r.Status().Patch(ctx, bky, client.MergeFrom(base)); err != nil {
+				return ctrl.Result{}, err
+			}
+			if r.RequeueAfter != nil {
+				return r.RequeueAfter(), nil
+			}
+			return ctrl.Result{}, nil
+		}
 		if err := backend.Driver.DeleteBuckety(ctx, bky.Status.BackendResourceName); err != nil {
+			r.eventIfTransition(bky, base.Status.Conditions, "Ready", metav1.ConditionFalse, "DeleteFailed",
+				corev1.EventTypeWarning, "DeleteFailed", err.Error())
 			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DeleteFailed", err.Error(), bky.Generation)
 			_ = r.Status().Patch(ctx, bky, client.MergeFrom(base))
 			return ctrl.Result{}, err
@@ -291,6 +387,9 @@ func (r *Reconciler) reconcileImplicitAccess(ctx context.Context, bky *bucketyv1
 }
 
 func (r *Reconciler) surfaceBackendUnavailable(ctx context.Context, bky, base *bucketyv1.Buckety) (ctrl.Result, error) {
+	r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
+		corev1.EventTypeWarning, "BackendUnavailable",
+		fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Spec.Backend))
 	setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
 		fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Spec.Backend),
 		bky.Generation)
@@ -299,6 +398,10 @@ func (r *Reconciler) surfaceBackendUnavailable(ctx context.Context, bky, base *b
 }
 
 func (r *Reconciler) surfaceCondition(ctx context.Context, bky, base *bucketyv1.Buckety, condType string, status metav1.ConditionStatus, reason, message string) (ctrl.Result, error) {
+	// Only failure surfaces route through here; the happy path
+	// records its own Provisioned event.
+	r.eventIfTransition(bky, base.Status.Conditions, condType, status, reason,
+		corev1.EventTypeWarning, reason, message)
 	setCond(&bky.Status.Conditions, condType, status, reason, message, bky.Generation)
 	return ctrl.Result{}, r.Status().Patch(ctx, bky, client.MergeFrom(base))
 }

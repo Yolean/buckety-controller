@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/pkg/config/schema/buckety-controller.schema.json
 # Controller config for e2e against VersityGW.
 # Backing service is sideloaded by the GHA prelude / locally;
 # expected at versitygw.blobs.svc.cluster.local:9000.

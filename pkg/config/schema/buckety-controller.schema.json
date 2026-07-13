@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "buckety-controller.yaml",
+  "description": "Outer shape of the controller config file loaded via -c <dir>. The config: block under each backend is driver-specific and strictly decoded by the driver; per-driver schemas live at pkg/drivers/<driver>/schema/<major.minor>/config.schema.json in this repo.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["backends"],
+  "properties": {
+    "backends": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "driver"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Consumer-facing backend name; Buckety.spec.backend selects it. Unique within the file."
+          },
+          "driver": {
+            "type": "string",
+            "enum": ["kadm", "s3"],
+            "description": "Registered driver name. The compiled-in set for this repo's binary is kadm and s3."
+          },
+          "config": {
+            "type": "object",
+            "description": "Driver-specific connection config, strictly decoded by the driver (unknown keys are a startup error). See pkg/drivers/<driver>/schema/<major.minor>/config.schema.json for the per-driver shape. Fields tagged envsubst in the driver's config struct accept ${VAR} interpolation."
+          },
+          "defaults": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Cluster-operator-owned substitutions for ${backend.X} references in Buckety.spec.name templates (SPEC: Naming templates)."
+          }
+        }
+      }
+    }
+  }
+}

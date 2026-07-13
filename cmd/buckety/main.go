@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"go.uber.org/zap/zapcore"
@@ -121,6 +122,7 @@ func main() {
 		Scheme:       mgr.GetScheme(),
 		Config:       loaded,
 		RequeueAfter: requeue,
+		Recorder:     mgr.GetEventRecorderFor("buckety-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "buckety controller setup failed")
 		os.Exit(1)
@@ -130,6 +132,7 @@ func main() {
 		Scheme:       mgr.GetScheme(),
 		Config:       loaded,
 		RequeueAfter: requeue,
+		Recorder:     mgr.GetEventRecorderFor("buckety-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "bucketyaccess controller setup failed")
 		os.Exit(1)
@@ -150,7 +153,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting", "version", version, "drivers", driverVersions())
+	setupLog.Info("starting", "version", version, "drivers", registry.Versions())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager Start returned")
 		os.Exit(1)
@@ -165,23 +168,12 @@ func backendNames(l *config.Loaded) []string {
 	return out
 }
 
-func driverVersions() map[string]string {
-	out := map[string]string{}
-	for _, name := range registry.Names() {
-		// Look up a no-op instance just to read its version is
-		// awkward; drivers do not (yet) expose their versions
-		// from the factory. For now we surface the registered
-		// names and leave per-driver versions to the controller
-		// logs each reconcile prints. This wires the
-		// startup-time observability without an interface change.
-		out[name] = "registered"
-	}
-	return out
-}
-
 func printVersions() {
 	fmt.Printf("buckety %s\n", version)
-	for _, name := range registry.Names() {
-		fmt.Printf("driver %s\n", name)
+	versions := registry.Versions()
+	names := registry.Names()
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Printf("driver %s %s\n", name, versions[name])
 	}
 }

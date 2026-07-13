@@ -1,0 +1,6 @@
+backends:
+- name: s3
+  driver: s3
+  config:
+    accessKeyID: literal
+    secretAccessKey: literal

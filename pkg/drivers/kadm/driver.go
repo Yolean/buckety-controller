@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -33,7 +34,7 @@ const DriverName = "kadm"
 var version = "0.1.0"
 
 func init() {
-	registry.Register(DriverName, factory)
+	registry.Register(DriverName, version, factory)
 }
 
 func factory(raw json.RawMessage) (registry.Driver, error) {
@@ -172,6 +173,29 @@ func (d *Driver) ValidateUpdateParameters(oldParams, newParams map[string]string
 	return nil
 }
 
+// topicNameRE is the Kafka-legal topic charset. Kafka additionally
+// warns about mixing '.' and '_' (metric-name collisions) but does
+// not reject it; neither do we.
+var topicNameRE = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// ValidateResourceName enforces Kafka topic naming rules on the
+// resolved spec.name template result.
+func (d *Driver) ValidateResourceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("topic name is empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("topic name %q is reserved", name)
+	}
+	if len(name) > 249 {
+		return fmt.Errorf("topic name is %d characters; Kafka's limit is 249", len(name))
+	}
+	if !topicNameRE.MatchString(name) {
+		return fmt.Errorf("topic name %q contains characters outside [a-zA-Z0-9._-]", name)
+	}
+	return nil
+}
+
 // ValidateAccessParameters: v1alpha1 kadm accepts no
 // access-level parameters.
 func (d *Driver) ValidateAccessParameters(params map[string]string) error {
@@ -275,14 +299,15 @@ func (d *Driver) alignTopic(ctx context.Context, name string, existing *topicVie
 			Reason: fmt.Sprintf("replicationFactor: current=%d requested=%d (cannot be changed in place; needs partition reassignment)", existing.rf, wantRF),
 		}
 	}
-	// Apply config delta.
+	// Apply config delta. Keys removed from spec.parameters are not
+	// reverted on the broker: translateParameters never produces nil
+	// values, and per SPEC "Parameters" an omitted parameter means
+	// "pass nothing for this knob" - the last applied value simply
+	// stops being managed.
 	alters := []kadm.AlterConfig{}
 	for k, vp := range wantCfgs {
 		cur, hadCur := existing.configs[k]
-		switch {
-		case vp == nil && hadCur:
-			alters = append(alters, kadm.AlterConfig{Op: kadm.DeleteConfig, Name: k})
-		case vp != nil && (!hadCur || cur != *vp):
+		if vp != nil && (!hadCur || cur != *vp) {
 			alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: k, Value: vp})
 		}
 	}

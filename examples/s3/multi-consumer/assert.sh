@@ -22,4 +22,18 @@ sni_rw="$(condition_status bucketyaccess/shared-rw ScopingNotImplemented)"
 [[ -z "$sni_rw" || "$sni_rw" == "False" ]] \
   || fail "shared-rw should not have ScopingNotImplemented=True (got '$sni_rw')"
 
+# Deletion blocks on explicit accesses (SPEC "Lifecycle and
+# deletion"): the controller surfaces BlockedByAccesses and does
+# not cascade. Removing the accesses unblocks promptly via the
+# access watch.
+log "deleting buckety/shared; expecting BlockedByAccesses"
+kc delete buckety/shared --wait=false
+wait_condition buckety/shared BlockedByAccesses True 60s
+kc get buckety/shared >/dev/null 2>&1 \
+  || fail "shared deleted while explicit accesses existed; cascade is not allowed"
+log "deleting the accesses; expecting shared deletion to complete"
+kc delete bucketyaccess --all --wait=true --timeout=60s
+kc wait --for=delete buckety/shared --timeout=60s \
+  || fail "shared deletion did not complete after accesses were removed"
+
 log "multi-consumer PASS"

@@ -15,7 +15,6 @@ import (
 	"net/http"
 
 	admissionv1 "k8s.io/api/admission/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -73,8 +72,19 @@ func (v *Validator) validateBuckety(_ context.Context, req admission.Request) ad
 		return admission.Allowed("backend missing but resource pre-exists; reconciler will surface BackendUnavailable")
 	}
 
-	if _, err := resolveName(&bky, backend); err != nil {
-		return admission.Denied(fmt.Sprintf("spec.name: %v", err))
+	// Template resolution and driver name rules are checked only
+	// until the resolved name is frozen in status (first reconcile).
+	// After that, label mutations that would change a hypothetical
+	// re-resolution are irrelevant: status.backendResourceName is
+	// sticky and admission must not reject unrelated updates.
+	if bky.Status.BackendResourceName == "" {
+		resolved, err := resolveName(&bky, backend)
+		if err != nil {
+			return admission.Denied(fmt.Sprintf("spec.name: %v", err))
+		}
+		if err := backend.Driver.ValidateResourceName(resolved); err != nil {
+			return admission.Denied(fmt.Sprintf("spec.name: resolves to %q: %v", resolved, err))
+		}
 	}
 
 	if req.Operation == admissionv1.Update && len(req.OldObject.Raw) > 0 {
@@ -111,22 +121,11 @@ func (v *Validator) validateAccess(_ context.Context, req admission.Request) adm
 	if access.Spec.CredentialsSecretName == "" {
 		return admission.Denied("spec.credentialsSecretName is required")
 	}
-	// We can't resolve the driver without the Buckety, and a
-	// BucketyAccess may be authored before its Buckety exists.
-	// Defer parameter validation to the reconciler in that case.
-	// If the Buckety+backend are present at admission time, we
-	// can do early rejection.
-	if access.Spec.Parameters != nil {
-		// Look up via backend pointer from the spec, defaulting to
-		// nothing if we cannot resolve. Without listing Bucketys
-		// here (admission webhooks should not Get against the API)
-		// we'd need the request's containing resources. Skip the
-		// pre-flight; the reconciler surfaces clear conditions.
-		_ = access
-	}
-	// Role enum is enforced by the CRD schema; no extra check
-	// here (per SPEC: keep CRD enum open for forward compat).
-	_ = metav1.Now()
+	// Parameter validation happens in the reconcile loop
+	// (ValidateAccessParameters): resolving the driver requires the
+	// referenced Buckety, which may legitimately not exist at
+	// admission time, and admission webhooks should not read from
+	// the API server. Role enum is enforced by the CRD schema.
 	return admission.Allowed("")
 }
 

@@ -1,0 +1,13 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: templated
+  labels:
+    yolean.se/generation: "003"
+spec:
+  backend: s3
+  name: "${backend.zone}-${namespace}-${name}-v${label['yolean.se/generation']}"
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: templated-bucket

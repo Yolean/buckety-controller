@@ -1,6 +1,8 @@
-# s3 / r2 / jurisdiction
+# s3 / jurisdiction-gating
 
-**Scenario:** Capability-gated parameter, R2-specific.
+**Scenario:** Capability-gated parameter admission, exercised
+from every s3 implementation in the matrix (the gating decision
+reads config discriminators, not the backing service).
 
 The `jurisdiction` parameter is honoured only when the backend
 declares `implementation: r2` in its config. Against any other
@@ -33,6 +35,6 @@ unconditionally so the admission check is reproducible.
    `jurisdiction: eu`) is accepted by admission. The
    resource may not reach Ready (no real R2), but
    admission MUST NOT reject.
-2. Applying `rejected-on-versitygw.yaml` (Buckety against
+2. Applying `rejected-on-non-r2.yaml` (Buckety against
    `s3` with `jurisdiction: eu`) is rejected. Message
    names `jurisdiction` and the actual implementation.

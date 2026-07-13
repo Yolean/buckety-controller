@@ -1,0 +1,9 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: invalid
+spec:
+  backend: kafka
+  parameters:
+    bogus: "1"
+  retentionPolicy: Retain

@@ -6,7 +6,10 @@ spec:
   backend: kafka-renamed
   parameters:
     partitions: "1"
-  retentionPolicy: Delete
+  # Retain: this Buckety outlives the renamed config (the scenario
+  # restores the original at the end), and retentionPolicy=Delete
+  # would block namespace cleanup on the then-missing backend.
+  retentionPolicy: Retain
   defaultAccess:
     role: ReadWrite
     credentialsSecretName: sticky-new-topic
