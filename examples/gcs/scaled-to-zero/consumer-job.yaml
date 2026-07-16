@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dial-tone-roundtrip
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: roundtrip
+        image: curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
+        env:
+        - name: GCS_ENDPOINT
+          valueFrom: { secretKeyRef: { name: dial-tone-bucket, key: endpoint } }
+        - name: BUCKETY_BUCKET
+          valueFrom: { secretKeyRef: { name: dial-tone-bucket, key: bucket } }
+        command: [sh, -ec]
+        args:
+        - |
+          echo "operator-down test: put/get on $BUCKETY_BUCKET"
+          echo "hello-from-the-dark" > /tmp/object.txt
+          curl -sfS -X POST \
+            "$GCS_ENDPOINT/upload/storage/v1/b/$BUCKETY_BUCKET/o?uploadType=media&name=dial-tone.txt" \
+            -H "Content-Type: text/plain" \
+            --data-binary @/tmp/object.txt > /dev/null
+          curl -sfS \
+            "$GCS_ENDPOINT/storage/v1/b/$BUCKETY_BUCKET/o/dial-tone.txt?alt=media" \
+            -o /tmp/back.txt
+          [ "$(cat /tmp/object.txt)" = "$(cat /tmp/back.txt)" ]

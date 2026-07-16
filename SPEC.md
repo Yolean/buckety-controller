@@ -72,12 +72,24 @@ classes — they pick the named thing their cluster offers.
 | --- | --- | --- | --- |
 | `kadm` | Kafka-protocol topics (Redpanda, Apache Kafka, Confluent) | `github.com/twmb/franz-go/pkg/kadm` | Redpanda |
 | `s3` | S3 API (VersityGW, MinIO, AWS S3, R2, Hetzner, GCS interop) | `github.com/aws/aws-sdk-go-v2/service/s3` | VersityGW + MinIO |
+| `gcs` | Google Cloud Storage, provisioned via the native JSON API | `cloud.google.com/go/storage` | fake-gcs-server |
 
 Driver names are short, semantic, and stable; they MUST NOT
 change after v1alpha1 ships. New drivers — `mysql` via
 `go-sql-driver/mysql`, `minio-admin` for scoped MinIO IAM,
 `versitygw-iam` for scoped VersityGW IAM — are follow-ups, not
-v1alpha1.
+v1alpha1. The `gcs` driver shipped as the first such follow-up
+(same v1alpha1 CRDs, additive driver registration).
+
+The `gcs` / `s3` boundary: the s3 driver's client-library bet
+covers GCS on the DATA path (HMAC keys work with SigV4 against
+`storage.googleapis.com`), but provisioning against GCS is not
+S3-compatible — bucket creation needs the project, and the
+native parameters (location, uniform bucket-level access,
+versioning, lifecycle) have no S3-interop equivalent. The gcs
+driver provisions through the native JSON API and mints Secrets
+whose keys are S3-protocol compatible, so consumers are unchanged
+whichever driver provisioned their bucket.
 
 The single `s3` driver covers all S3-compatible backends. e2e on
 VersityGW and MinIO is the warrant that workloads aimed at AWS S3,
@@ -633,6 +645,32 @@ identically to every `BucketyAccess`). v1alpha2 with per-access
 IAM minting will replace them with scoped credentials; key names
 stay the same.
 
+### `gcs` driver
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-bucket
+  namespace: tenant1
+type: Opaque
+data:
+  endpoint:        <base64>    # https://storage.googleapis.com (S3-interop data path)
+  bucket:          <base64>    # tenant1-orders                (resource-type key)
+  project:         <base64>    # the backend's GCP project
+  accessKeyID:     <base64>
+  secretAccessKey: <base64>
+```
+
+The access keys are the backend's static HMAC pair (minted out of
+band via `gcloud storage hmac create`, copied identically to
+every `BucketyAccess`). Driver-minted per-access credentials are
+deliberately deferred to the v1alpha2 scoping design: GrantAccess
+runs on every reconcile and its result rewrites the Secret, and a
+GCS HMAC secret is only retrievable at creation, so per-access
+minting cannot be idempotent until grant-once semantics exist.
+Key names stay the same when scoped credentials land.
+
 ## Lifecycle and deletion
 
 - Both kinds carry a finalizer `buckety.yolean.se/cleanup`.
@@ -794,6 +832,7 @@ Required CI matrix for v1alpha1:
 | --- | --- |
 | `kadm` | redpanda |
 | `s3`   | versitygw, minio |
+| `gcs`  | fakegcs (fake-gcs-server; covers the JSON-API control plane — real-GCS-only behaviours like HMAC auth enforcement and the 90-day UBLA disable window are documented, not e2e-gated) |
 
 Adding an implementation later (e.g. AWS S3 once the project has
 credentials and a budget) requires no example or harness changes,

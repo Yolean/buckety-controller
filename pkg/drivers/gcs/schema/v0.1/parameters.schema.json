@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gcs driver Buckety parameters",
+  "description": "Schema for Buckety.spec.parameters when the resolved driver is gcs. All values are strings per the CRD contract. Omitted parameters are unmanaged: the driver never touches that knob on the backend and GCS's own defaults apply at creation (location US, uniform bucket-level access off, versioning off, no lifecycle rules).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "location": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Bucket location (e.g. EUROPE-WEST4, EU, US). Set at bucket creation, immutable post-create: buckets cannot move in place, so a location that disagrees with the backend surfaces ParameterDrift."
+    },
+    "uniformBucketLevelAccess": {
+      "type": "string",
+      "enum": ["true", "false"],
+      "description": "Uniform bucket-level access (IAM-only, no object ACLs). Recommended \"true\" for private gateway-fronted buckets. Mutable; note GCS only allows disabling within 90 days of enabling - a later disable surfaces as a reconcile error."
+    },
+    "versioning": {
+      "type": "string",
+      "enum": ["true", "false"],
+      "description": "Object versioning. Mutable; reconciled in place."
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Object lifecycle rules as a JSON document in the same shape `gsutil lifecycle set` takes: {\"rule\": [{\"action\": {\"type\": \"Delete\"}, \"condition\": {\"age\": 30}}]}. Action types: Delete, SetStorageClass (with storageClass), AbortIncompleteMultipartUpload. Condition fields: age, createdBefore, customTimeBefore, daysSinceCustomTime, daysSinceNoncurrentTime, isLive, matchesPrefix, matchesStorageClass, matchesSuffix, noncurrentTimeBefore, numNewerVersions. Mutable; reconciled in place. {\"rule\": []} clears all rules; omitting the parameter leaves rules unmanaged."
+    }
+  }
+}

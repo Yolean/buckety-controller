@@ -55,17 +55,26 @@ here. The deviations are operational, not architectural:
 
 ## Status
 
-v1alpha1. Two drivers shipped:
+v1alpha1. Three drivers shipped:
 
 | Driver | Backing services | Notes |
 | --- | --- | --- |
 | `kadm` | Kafka-protocol brokers (Redpanda, Apache Kafka, Confluent) | Topic create/alter/delete. v1alpha1: no per-consumer SASL/SCRAM scoping. |
 | `s3` | S3-compatible (VersityGW, MinIO, AWS S3, Cloudflare R2, Hetzner, GCS interop) | Bucket create/delete. v1alpha1: all consumers receive the backend's root keys. |
+| `gcs` | Google Cloud Storage via the native JSON API | Bucket create/update/delete with location, uniform bucket-level access, versioning and lifecycle parameters. Access Secrets carry a static HMAC pair (S3-protocol data path); all consumers receive the same pair. |
 
-e2e coverage in CI runs against Redpanda (`kadm`) and VersityGW +
-MinIO (`s3`). The other listed S3 backends share the same client
-library and the same e2e shape; if you hit a compatibility issue
-with one of them, please file an issue.
+e2e coverage in CI runs against Redpanda (`kadm`), VersityGW +
+MinIO (`s3`) and fake-gcs-server (`gcs`). The other listed S3
+backends share the same client library and the same e2e shape; if
+you hit a compatibility issue with one of them, please file an
+issue. For `gcs`, behaviours the emulator cannot exercise (HMAC
+auth enforcement, the 90-day window for disabling uniform
+bucket-level access) are documented rather than e2e-gated.
+
+Use `gcs` (not `s3` interop) when the controller should provision
+GCS buckets: creation needs the project, and location / uniform
+bucket-level access / versioning / lifecycle only exist on the
+native API. Consumers see S3-compatible Secrets either way.
 
 ## How it works
 
@@ -174,7 +183,23 @@ backends:
     forcePathStyle: true
     accessKeyID:     ${VERSITYGW_ROOT_ACCESSKEY}
     secretAccessKey: ${VERSITYGW_ROOT_SECRETKEY}
+
+- name: gcs-objects
+  driver: gcs
+  config:
+    project: my-gcp-project
+    # Static S3-interop HMAC pair written to access Secrets;
+    # mint out of band with: gcloud storage hmac create <sa-email>
+    accessKeyID:     ${GCS_HMAC_ACCESS_ID}
+    secretAccessKey: ${GCS_HMAC_SECRET}
 ```
+
+The gcs control plane authenticates separately, via Application
+Default Credentials: mount a service-account JSON key and set
+`GOOGLE_APPLICATION_CREDENTIALS` on the controller Deployment
+(Workload Identity also works where it exists). That service
+account needs bucket create/get/update/delete on the project;
+the HMAC pair above is data-plane only.
 
 ### Credentials via `${VAR}`
 

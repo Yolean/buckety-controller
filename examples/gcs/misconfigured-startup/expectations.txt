@@ -1,0 +1,7 @@
+# <variant-filename> <regex>
+# Patterns match against raw JSON-formatted controller log. Quoted
+# field names appear as \", so regexes use distinctive substrings
+# rather than literal quote matching.
+strict-decode.yaml          unknown field.*projcet
+missing-required.yaml       missing required field.*project
+undefined-var.yaml          undefined variable.*BUCKETY_E2E_UNSET_VAR

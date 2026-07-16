@@ -105,6 +105,7 @@ not a contract.
 | --- | --- |
 | `kadm` | redpanda |
 | `s3`   | versitygw, minio |
+| `gcs`  | fakegcs (fake-gcs-server emulator) |
 
 Per SPEC.md §E2E harness. The jurisdiction capability gate is
 asserted from every s3 implementation in the matrix
@@ -125,6 +126,7 @@ pkg/webhook/                 single validating webhook, both kinds
 pkg/drivers/registry/        driver name -> factory map
 pkg/drivers/kadm/            kadm driver impl + schema/
 pkg/drivers/s3/              s3 driver impl + schema/
+pkg/drivers/gcs/             gcs driver impl + schema/
 pkg/template/                spec.name template resolver
 deploy/kustomize/base/       CRDs, RBAC, Deployment, Service, webhook
 deploy/kustomize/release/    generated at tag time; vendored downstream
