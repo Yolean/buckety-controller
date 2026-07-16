@@ -15,6 +15,7 @@ owner_kind="$(kc get bucketyaccess/orders -o jsonpath='{.metadata.ownerReference
 
 # Secret shape per SPEC §Secret output (kadm driver).
 secret_has_keys orders-topic bootstrap topic
+secret_owned_label orders-topic
 
 topic_name="$(secret_value orders-topic topic)"
 log "resolved topic name: $topic_name"

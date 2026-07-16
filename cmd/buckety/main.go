@@ -21,10 +21,14 @@ import (
 	"time"
 
 	"go.uber.org/zap/zapcore"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -103,6 +107,20 @@ func main() {
 		HealthProbeBindAddress: healthAddr,
 		LeaderElection:         leaderElect,
 		LeaderElectionID:       "buckety-controller-leader",
+		// The Secret informer is scoped to controller-minted
+		// Secrets; unscoped, the Owns() watch LISTs and caches
+		// every Secret in the cluster, and controller memory
+		// tracks cluster size instead of buckety usage (OOMKilled
+		// at default limits on a multi-site cluster, issue #10).
+		// Reads that must see unlabelled Secrets go through
+		// mgr.GetAPIReader() (see the access reconciler's Live).
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}: {Label: labels.SelectorFromSet(labels.Set{
+					bucketyv1.LabelOwnedSecret: "true",
+				})},
+			},
+		},
 	}
 	if enableWebhook {
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
@@ -134,6 +152,7 @@ func main() {
 		Config:       loaded,
 		RequeueAfter: requeue,
 		Recorder:     mgr.GetEventRecorderFor("buckety-controller"),
+		Live:         mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "bucketyaccess controller setup failed")
 		os.Exit(1)
