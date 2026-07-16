@@ -22,3 +22,21 @@ backends:
     region: auto
     accessKeyID: not-used
     secretAccessKey: not-used
+
+# Use-case-named backend for examples/*/portable-blobs-cr/: the
+# byte-identical CR (backend: objects) provisions here and on every
+# other bucket-family implementation. Site-wide parameter defaults
+# live here, merged under CR parameters (CR wins per key).
+- name: objects
+  driver: s3
+  config:
+    implementation: minio
+    endpoint: http://minio.blobs.svc.cluster.local:9000
+    region: us-east-1
+    forcePathStyle: true
+    accessKeyID:     ${MINIO_ROOT_USER}
+    secretAccessKey: ${MINIO_ROOT_PASSWORD}
+  defaults:
+    zone: e2e
+  parameters:
+    versioning: "true"

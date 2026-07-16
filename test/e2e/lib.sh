@@ -142,6 +142,20 @@ s3_bucket_exists() {
   fi
 }
 
+# s3_api <endpoint> <access> <secret> <s3api subcommand and args...>
+# Runs an arbitrary s3api call via an ephemeral aws-cli pod and
+# echoes its combined output. Caller checks the exit code.
+s3_api() {
+  local endpoint="$1" access="$2" secret="$3"
+  shift 3
+  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+    --image=public.ecr.aws/aws-cli/aws-cli:latest \
+    --env="AWS_ACCESS_KEY_ID=$access" \
+    --env="AWS_SECRET_ACCESS_KEY=$secret" \
+    "awscli-api-$RANDOM" -- \
+    s3api "$@" --endpoint-url "$endpoint" </dev/null 2>&1
+}
+
 # condition_status <kind/name> <conditionType>
 # Echoes True | False | Unknown | <empty> for the named condition.
 condition_status() {
