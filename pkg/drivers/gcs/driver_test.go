@@ -296,6 +296,30 @@ func TestUpdateForDrift(t *testing.T) {
 	}
 }
 
+// Once any knob drifts, the update payload carries every managed
+// knob, drifted or not: a backend with replace-like update
+// semantics (fake-gcs-server resets fields absent from the
+// payload) must not un-converge settled values. Seen live as
+// portable-blobs-cr flaking on versioning (run 29509508991): the
+// emulator drops UBLA/lifecycle, the resulting perpetual drift
+// update wiped the already-correct versioning flag.
+func TestUpdateForDriftCarriesAllManagedKnobs(t *testing.T) {
+	current := &storage.BucketAttrs{VersioningEnabled: true}
+	up, err := updateForDrift(map[string]string{
+		"versioning":               "true",
+		"uniformBucketLevelAccess": "true",
+	}, current)
+	if err != nil {
+		t.Fatalf("updateForDrift: %v", err)
+	}
+	if up == nil || up.UniformBucketLevelAccess == nil || !up.UniformBucketLevelAccess.Enabled {
+		t.Fatalf("UBLA drift not reconciled: %+v", up)
+	}
+	if up.VersioningEnabled != true {
+		t.Errorf("undrifted managed versioning missing from update payload: %+v", up)
+	}
+}
+
 func TestFactoryValidation(t *testing.T) {
 	// Client construction succeeds offline against an emulator
 	// coordinate; ADC is not consulted when the env var is set.

@@ -538,6 +538,13 @@ func attrsForCreate(params map[string]string) (*storage.BucketAttrs, error) {
 // backend's current attributes and returns the update that
 // reconciles them, or nil when nothing differs. Location is
 // handled by the caller (unreconcilable → ErrParameterDrift).
+//
+// The update payload carries EVERY managed knob, not only the
+// drifted ones - drift on any of them just decides whether to
+// send it. Re-asserting an undrifted value is a no-op on real
+// GCS, but a backend with replace-like update semantics (the e2e
+// emulator resets fields absent from the payload) would otherwise
+// un-converge knobs that were already right.
 func updateForDrift(params map[string]string, attrs *storage.BucketAttrs) (*storage.BucketAttrsToUpdate, error) {
 	var update storage.BucketAttrsToUpdate
 	dirty := false
@@ -546,8 +553,8 @@ func updateForDrift(params map[string]string, attrs *storage.BucketAttrs) (*stor
 		if err != nil {
 			return nil, fmt.Errorf("parameters.uniformBucketLevelAccess: %w", err)
 		}
+		update.UniformBucketLevelAccess = &storage.UniformBucketLevelAccess{Enabled: b}
 		if attrs.UniformBucketLevelAccess.Enabled != b {
-			update.UniformBucketLevelAccess = &storage.UniformBucketLevelAccess{Enabled: b}
 			dirty = true
 		}
 	}
@@ -556,8 +563,8 @@ func updateForDrift(params map[string]string, attrs *storage.BucketAttrs) (*stor
 		if err != nil {
 			return nil, fmt.Errorf("parameters.versioning: %w", err)
 		}
+		update.VersioningEnabled = b
 		if attrs.VersioningEnabled != b {
-			update.VersioningEnabled = b
 			dirty = true
 		}
 	}
@@ -566,8 +573,8 @@ func updateForDrift(params map[string]string, attrs *storage.BucketAttrs) (*stor
 		if err != nil {
 			return nil, fmt.Errorf("parameters.lifecycle: %w", err)
 		}
+		update.Lifecycle = lc
 		if !reflect.DeepEqual(attrs.Lifecycle, *lc) {
-			update.Lifecycle = lc
 			dirty = true
 		}
 	}
@@ -580,8 +587,8 @@ func updateForDrift(params map[string]string, attrs *storage.BucketAttrs) (*stor
 		if attrs.SoftDeletePolicy != nil {
 			current = attrs.SoftDeletePolicy.RetentionDuration
 		}
+		update.SoftDeletePolicy = &storage.SoftDeletePolicy{RetentionDuration: want}
 		if current != want {
-			update.SoftDeletePolicy = &storage.SoftDeletePolicy{RetentionDuration: want}
 			dirty = true
 		}
 	}
@@ -594,8 +601,8 @@ func updateForDrift(params map[string]string, attrs *storage.BucketAttrs) (*stor
 		// labels absent from the parameter are unmanaged and never
 		// deleted - same posture as unlisted parameters.
 		for k2, v2 := range want {
+			update.SetLabel(k2, v2)
 			if attrs.Labels[k2] != v2 {
-				update.SetLabel(k2, v2)
 				dirty = true
 			}
 		}
