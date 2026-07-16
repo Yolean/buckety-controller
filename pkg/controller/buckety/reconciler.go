@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -302,6 +303,19 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 			return ctrl.Result{}, nil
 		}
 		if err := backend.Driver.DeleteBuckety(ctx, bky.Status.BackendResourceName); err != nil {
+			if registry.IsDeletionInProgress(err) {
+				// Recursive contents deletion runs in bounded
+				// slices; this is progress, not failure. The
+				// (status, reason) event gate keeps the stream
+				// quiet while the message advances.
+				r.eventIfTransition(bky, base.Status.Conditions, "Ready", metav1.ConditionFalse, "DeletingContents",
+					corev1.EventTypeNormal, "DeletingContents", err.Error())
+				setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DeletingContents", err.Error(), bky.Generation)
+				if perr := r.Status().Patch(ctx, bky, client.MergeFrom(base)); perr != nil {
+					return ctrl.Result{}, perr
+				}
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 			r.eventIfTransition(bky, base.Status.Conditions, "Ready", metav1.ConditionFalse, "DeleteFailed",
 				corev1.EventTypeWarning, "DeleteFailed", err.Error())
 			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DeleteFailed", err.Error(), bky.Generation)

@@ -233,3 +233,16 @@ secret_owned_label() {
   [[ "$v" == "true" ]] \
     || fail "Secret/$secret missing buckety.yolean.se/owned=true label (got '$v')"
 }
+
+# gcs_object_put <bucket> <endpoint> <key> <content>
+# Uploads via the JSON API (unauthenticated emulator).
+gcs_object_put() {
+  local bucket="$1" endpoint="$2" key="$3" content="$4"
+  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+    --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
+    "curl-put-$RANDOM" -- \
+    -sfS -o /dev/null -X POST \
+    -H "Content-Type: text/plain" \
+    --data-raw "$content" \
+    "$endpoint/upload/storage/v1/b/$bucket/o?uploadType=media&name=$key" </dev/null
+}

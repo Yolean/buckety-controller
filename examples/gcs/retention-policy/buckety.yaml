@@ -16,6 +16,10 @@ metadata:
 spec:
   backend: gcs
   retentionPolicy: Delete
+  parameters:
+    # Versioned so the recursive Delete also proves archived
+    # generations do not wedge deletion.
+    versioning: "true"
   defaultAccess:
     role: ReadWrite
     credentialsSecretName: drop-me-bucket

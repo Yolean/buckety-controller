@@ -142,21 +142,95 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 	return fmt.Errorf("s3: create bucket %q: %w", req.Name, err)
 }
 
-// DeleteBuckety removes the backend bucket. Idempotent on
-// NoSuchBucket. Buckets must be empty for DeleteBucket to
-// succeed; v1alpha1 does not empty the bucket on the operator's
-// behalf - SPEC §Lifecycle and deletion treats deletion as a
-// deliberate Delete-policy choice and the operator is expected to
-// have drained or accept that DeleteBucket may fail until empty.
+// DeleteBuckety removes the backend bucket and its contents -
+// PersistentVolume reclaimPolicy=Delete semantics per SPEC
+// §Lifecycle and deletion. Idempotent on NoSuchBucket.
+//
+// Contents are emptied in bounded slices (one list page of up to
+// 1000 keys per call, then one page of versions/delete-markers on
+// versioned buckets); ErrDeletionInProgress tells the controller
+// to requeue promptly. A bucket under sustained concurrent writes
+// is chased rather than declared failed.
 func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
-	_, err := d.client.DeleteBucket(ctx, &awss3.DeleteBucketInput{Bucket: aws.String(name)})
-	if err == nil {
+	deleted, err := d.emptyBucketSlice(ctx, name)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("s3: empty bucket %q for deletion: %w", name, err)
+	}
+	if deleted > 0 {
+		return &registry.ErrDeletionInProgress{Progress: fmt.Sprintf("bucket %q: deleted %d objects, checking for more", name, deleted)}
+	}
+	_, err = d.client.DeleteBucket(ctx, &awss3.DeleteBucketInput{Bucket: aws.String(name)})
+	if err == nil || isNotFound(err) {
 		return nil
 	}
-	if isNotFound(err) {
-		return nil
+	if isBucketNotEmpty(err) {
+		// Raced a writer (or an implementation that hides keys from
+		// our listing); keep chasing instead of failing.
+		return &registry.ErrDeletionInProgress{Progress: fmt.Sprintf("bucket %q: still not empty after emptying pass", name)}
 	}
 	return fmt.Errorf("s3: delete bucket %q: %w", name, err)
+}
+
+// emptyBucketSlice deletes up to one list page of current objects,
+// or - once no current objects remain - up to one page of object
+// versions and delete markers (versioned buckets refuse deletion
+// while any version exists). Returns how many were deleted.
+func (d *Driver) emptyBucketSlice(ctx context.Context, name string) (int, error) {
+	list, err := d.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: aws.String(name)})
+	if err != nil {
+		return 0, err
+	}
+	var ids []s3types.ObjectIdentifier
+	for _, o := range list.Contents {
+		ids = append(ids, s3types.ObjectIdentifier{Key: o.Key})
+	}
+	if len(ids) == 0 {
+		ids, err = d.listVersionsPage(ctx, name)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	out, err := d.client.DeleteObjects(ctx, &awss3.DeleteObjectsInput{
+		Bucket: aws.String(name),
+		Delete: &s3types.Delete{Objects: ids, Quiet: aws.Bool(true)},
+	})
+	if err != nil {
+		return 0, err
+	}
+	if len(out.Errors) > 0 {
+		e := out.Errors[0]
+		return 0, fmt.Errorf("delete of %q refused (%s): %s (and %d more)",
+			aws.ToString(e.Key), aws.ToString(e.Code), aws.ToString(e.Message), len(out.Errors)-1)
+	}
+	return len(ids), nil
+}
+
+// listVersionsPage returns one page of version + delete-marker
+// identifiers. Implementations without versioning support surface
+// NotImplemented, which is treated as "no versions".
+func (d *Driver) listVersionsPage(ctx context.Context, name string) ([]s3types.ObjectIdentifier, error) {
+	vlist, err := d.client.ListObjectVersions(ctx, &awss3.ListObjectVersionsInput{Bucket: aws.String(name)})
+	if err != nil {
+		var api smithy.APIError
+		if errors.As(err, &api) && api.ErrorCode() == "NotImplemented" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ids []s3types.ObjectIdentifier
+	for _, v := range vlist.Versions {
+		ids = append(ids, s3types.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId})
+	}
+	for _, m := range vlist.DeleteMarkers {
+		ids = append(ids, s3types.ObjectIdentifier{Key: m.Key, VersionId: m.VersionId})
+	}
+	return ids, nil
 }
 
 // GrantAccess returns the s3 Secret payload for a BucketyAccess.
@@ -318,6 +392,13 @@ func isAlreadyExists(err error) bool {
 	}
 	var api smithy.APIError
 	return errors.As(err, &api) && api.ErrorCode() == "BucketAlreadyExists"
+}
+
+// isBucketNotEmpty reports the backend refusing DeleteBucket on
+// remaining contents.
+func isBucketNotEmpty(err error) bool {
+	var api smithy.APIError
+	return errors.As(err, &api) && api.ErrorCode() == "BucketNotEmpty"
 }
 
 // isNotFound reports whether err is the S3 service signalling a

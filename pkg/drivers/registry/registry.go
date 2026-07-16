@@ -33,9 +33,19 @@ type Driver interface {
 	// ErrParameterDrift carrying a human-readable reason.
 	EnsureBuckety(ctx context.Context, req EnsureRequest) error
 
-	// DeleteBuckety removes the backend resource. Idempotent on
-	// NotFound. Called only when Buckety.spec.retentionPolicy is
-	// Delete.
+	// DeleteBuckety removes the backend resource AND its contents
+	// - PersistentVolume reclaimPolicy=Delete semantics; the
+	// operator opted into data loss when choosing the policy.
+	// Idempotent on NotFound. Called only when
+	// Buckety.spec.retentionPolicy is Delete.
+	//
+	// Contents deletion is bounded per call: a driver empties a
+	// slice of the resource and returns ErrDeletionInProgress
+	// carrying human-readable progress when more remains; the
+	// controller requeues promptly. Store-level protections the
+	// data plane placed on individual items (object holds,
+	// retention) are honoured, not fought: deletion blocks with an
+	// error naming the protected items until they are released.
 	DeleteBuckety(ctx context.Context, name string) error
 
 	// GrantAccess returns the Secret payload to mint for a
@@ -140,6 +150,26 @@ func (e *ErrParameterDrift) Error() string {
 // ErrParameterDrift.
 func IsParameterDrift(err error) bool {
 	var d *ErrParameterDrift
+	return errors.As(err, &d)
+}
+
+// ErrDeletionInProgress is the typed error DeleteBuckety returns
+// when a bounded slice of recursive deletion completed but
+// contents remain. Not a failure: the controller surfaces
+// Progress on the resource and requeues promptly instead of
+// backing off.
+type ErrDeletionInProgress struct {
+	Progress string
+}
+
+func (e *ErrDeletionInProgress) Error() string {
+	return "deletion in progress: " + e.Progress
+}
+
+// IsDeletionInProgress reports whether err is or wraps an
+// ErrDeletionInProgress.
+func IsDeletionInProgress(err error) bool {
+	var d *ErrDeletionInProgress
 	return errors.As(err, &d)
 }
 
