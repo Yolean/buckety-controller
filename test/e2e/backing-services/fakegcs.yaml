@@ -25,6 +25,11 @@ spec:
       labels:
         app: fake-gcs
     spec:
+      # The Service named fake-gcs makes kubelet inject
+      # FAKE_GCS_PORT=tcp://<ip>:8000 (docker-link style), which
+      # fake-gcs-server parses as its own FAKE_GCS_* env config and
+      # exits 1 on. Service links off keeps the env clean.
+      enableServiceLinks: false
       containers:
       - name: fake-gcs
         image: docker.io/fsouza/fake-gcs-server:1.54.0
