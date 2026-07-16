@@ -318,24 +318,51 @@ func TestFactoryValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
-	gd := d.(*Driver)
-	if gd.cfg.Endpoint != defaultEndpoint {
-		t.Errorf("endpoint default: want %q, got %q", defaultEndpoint, gd.cfg.Endpoint)
+	if got := d.(*Driver).cfg.Endpoint; got != "" {
+		t.Errorf("endpoint should stay empty (derived per bucket), got %q", got)
 	}
 
-	d, err = factory(json.RawMessage(`{"project": "p", "endpoint": "http://fake-gcs:4443", "accessKeyID": "a", "secretAccessKey": "s"}`))
-	if err != nil {
-		t.Fatalf("valid config with endpoint rejected: %v", err)
+	// Endpoint overrides are bare hosts; a scheme is a config error
+	// (issue #14: consumers prepend the scheme themselves).
+	if _, err := factory(json.RawMessage(`{"project": "p", "endpoint": "http://fake-gcs:8000", "accessKeyID": "a", "secretAccessKey": "s"}`)); err == nil {
+		t.Error("scheme'd endpoint accepted; want bare-host rejection")
 	}
-	if got := d.(*Driver).cfg.Endpoint; got != "http://fake-gcs:4443" {
+	d, err = factory(json.RawMessage(`{"project": "p", "endpoint": "fake-gcs:8000", "accessKeyID": "a", "secretAccessKey": "s"}`))
+	if err != nil {
+		t.Fatalf("valid bare-host endpoint rejected: %v", err)
+	}
+	if got := d.(*Driver).cfg.Endpoint; got != "fake-gcs:8000" {
 		t.Errorf("endpoint override: got %q", got)
 	}
 }
 
+func TestLocationEndpoint(t *testing.T) {
+	cases := []struct {
+		location, endpoint, region string
+	}{
+		{"EUROPE-WEST4", "storage.europe-west4.rep.googleapis.com", "europe-west4"},
+		{"us-central1", "storage.us-central1.rep.googleapis.com", "us-central1"},
+		{"EU", "storage.googleapis.com", ""},   // multi-region: no locational endpoint
+		{"US", "storage.googleapis.com", ""},   // multi-region
+		{"EUR4", "storage.googleapis.com", ""}, // dual-region code
+		{"", "storage.googleapis.com", ""},
+	}
+	for _, c := range cases {
+		e, r := locationEndpoint(c.location)
+		if e != c.endpoint || r != c.region {
+			t.Errorf("locationEndpoint(%q) = (%q, %q), want (%q, %q)", c.location, e, r, c.endpoint, c.region)
+		}
+	}
+}
+
 func TestGrantAccessPayload(t *testing.T) {
+	// With an endpoint override the payload is config-only (no
+	// backend lookup); the derived path is covered by e2e and the
+	// fakestorage smoke, since it reads bucket attrs.
 	d := &Driver{cfg: &Config{
 		Project:         "yo-project",
-		Endpoint:        defaultEndpoint,
+		Endpoint:        "fake-gcs:8000",
+		Region:          "e2e-region-1",
 		AccessKeyID:     "GOOG1EXAMPLE",
 		SecretAccessKey: "sekrit",
 	}}
@@ -350,9 +377,10 @@ func TestGrantAccessPayload(t *testing.T) {
 		t.Error("v0.1 static credentials must report Scoped=false")
 	}
 	want := map[string]string{
-		"endpoint":        defaultEndpoint,
+		"endpoint":        "fake-gcs:8000",
 		"bucket":          "tenant1-orders",
 		"project":         "yo-project",
+		"region":          "e2e-region-1",
 		"accessKeyID":     "GOOG1EXAMPLE",
 		"secretAccessKey": "sekrit",
 	}

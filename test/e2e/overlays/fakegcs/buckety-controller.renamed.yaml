@@ -9,7 +9,7 @@ backends:
   driver: gcs
   config:
     project: e2e-project
-    endpoint: http://fake-gcs.blobs.svc.cluster.local:8000
+    endpoint: fake-gcs.blobs.svc.cluster.local:8000
     region: e2e-region-1
     accessKeyID: e2e-fake-hmac-id
     secretAccessKey: e2e-fake-hmac-secret

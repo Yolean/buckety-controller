@@ -666,13 +666,19 @@ metadata:
   namespace: tenant1
 type: Opaque
 data:
-  endpoint:        <base64>    # S3-interop data path; regional (storage.<region>.rep.googleapis.com) where residency matters
+  endpoint:        <base64>    # S3-interop BARE host (no scheme), derived per bucket: storage.<region>.rep.googleapis.com for regional locations, storage.googleapis.com for multi-regions
   bucket:          <base64>    # tenant1-orders                (resource-type key)
   project:         <base64>    # the backend's GCP project
-  region:          <base64>    # SigV4 signing region (present when the backend configures it)
+  region:          <base64>    # SigV4 signing region, derived with the endpoint (absent for multi-regions)
   accessKeyID:     <base64>
   secretAccessKey: <base64>
 ```
+
+Unlike the s3 driver, whose `endpoint` passes the configured URL
+through verbatim, the gcs `endpoint` is a bare host: consumers
+prepend the scheme. The regional derivation keeps the data path
+in-region (residency) and gives SigV4 its signing region; backend
+config can override both fields for emulators.
 
 The access keys are the backend's static HMAC pair (minted out of
 band via `gcloud storage hmac create`, copied identically to
