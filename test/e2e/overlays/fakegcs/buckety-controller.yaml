@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/pkg/config/schema/buckety-controller.schema.json
+# Controller config for e2e against fake-gcs-server. The control
+# plane reaches the emulator via STORAGE_EMULATOR_HOST (set in
+# deployment-env.yaml); the endpoint here is what access Secrets
+# carry, pointed at the same emulator so consumer Jobs and the
+# controller agree. The HMAC pair is inert: the emulator does not
+# authenticate, and e2e asserts the pair is delivered, not that
+# the backend enforces it.
+backends:
+
+- name: gcs
+  driver: gcs
+  config:
+    project: e2e-project
+    endpoint: http://fake-gcs.blobs.svc.cluster.local:8000
+    accessKeyID: e2e-fake-hmac-id
+    secretAccessKey: e2e-fake-hmac-secret
+  defaults:
+    zone: e2e

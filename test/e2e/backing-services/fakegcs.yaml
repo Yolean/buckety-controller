@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-gcs
+  namespace: blobs
+spec:
+  selector:
+    app: fake-gcs
+  ports:
+  - port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-gcs
+  namespace: blobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-gcs
+  template:
+    metadata:
+      labels:
+        app: fake-gcs
+    spec:
+      containers:
+      - name: fake-gcs
+        image: docker.io/fsouza/fake-gcs-server:1.54.0
+        args:
+        - -scheme=http
+        - -port=8000
+        - -backend=memory
+        # public-host/external-url shape the URLs the server hands
+        # back (resumable uploads, mediaLink); they must match how
+        # clients reach the Service or follow-up requests dial a
+        # dead address.
+        - -public-host=fake-gcs.blobs.svc.cluster.local:8000
+        - -external-url=http://fake-gcs.blobs.svc.cluster.local:8000
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 2
+          periodSeconds: 3

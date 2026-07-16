@@ -164,3 +164,60 @@ resource_absent() {
   kc wait --for=delete "$target" --timeout="$timeout" \
     || fail "$target was not deleted within $timeout"
 }
+
+# ---- gcs helpers (coupled camp: assume the fake-gcs-server e2e
+# backing service, which accepts unauthenticated JSON API calls;
+# against real GCS these curls would need an OAuth token) ----
+
+# gcs_api <url>
+# GETs the URL via an ephemeral curl pod, echoing the body.
+# Returns non-zero on HTTP >= 400 (curl -f).
+gcs_api() {
+  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+    --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
+    "curl-check-$RANDOM" -- \
+    -sfS "$1" </dev/null 2>&1
+}
+
+# gcs_bucket_exists <bucket> <endpoint>
+# Verifies the bucket exists on the GCS JSON API.
+gcs_bucket_exists() {
+  local bucket="$1" endpoint="$2"
+  log "verifying GCS bucket '$bucket' at $endpoint"
+  local out
+  if ! out="$(gcs_api "$endpoint/storage/v1/b/$bucket")"; then
+    printf '%s\n' "$out" >&2
+    fail "GCS bucket '$bucket' not found at $endpoint"
+  fi
+}
+
+# gcs_bucket_exists_quiet <bucket> <endpoint>
+# Existence probe without failing the scenario; for polling loops
+# and negative assertions.
+gcs_bucket_exists_quiet() {
+  gcs_api "$2/storage/v1/b/$1" >/dev/null 2>&1
+}
+
+# gcs_bucket_delete <bucket> <endpoint>
+# Deletes the bucket directly (out-of-band mutation).
+gcs_bucket_delete() {
+  local bucket="$1" endpoint="$2"
+  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+    --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
+    "curl-oob-$RANDOM" -- \
+    -sfS -X DELETE "$endpoint/storage/v1/b/$bucket" </dev/null
+}
+
+# gcs_bucket_versioning_enabled <bucket> <endpoint>
+# Returns 0 when the bucket reports versioning enabled. Whitespace
+# is stripped before matching so the check is independent of the
+# server's JSON formatting.
+gcs_bucket_versioning_enabled() {
+  local bucket="$1" endpoint="$2"
+  local out
+  out="$(gcs_api "$endpoint/storage/v1/b/$bucket")" || {
+    printf '%s\n' "$out" >&2
+    fail "GCS bucket '$bucket' not readable at $endpoint"
+  }
+  printf '%s' "$out" | tr -d '[:space:]' | grep -q '"versioning":{"enabled":true}'
+}

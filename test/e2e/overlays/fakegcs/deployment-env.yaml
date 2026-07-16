@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buckety-controller
+spec:
+  template:
+    spec:
+      containers:
+      - name: controller
+        env:
+        # The GCS client library routes to the emulator and skips
+        # ADC when this is set; no GOOGLE_APPLICATION_CREDENTIALS
+        # needed in e2e.
+        - name: STORAGE_EMULATOR_HOST
+          value: fake-gcs.blobs.svc.cluster.local:8000

@@ -8,7 +8,7 @@
 # cluster with backing services available.
 #
 # Inputs (env):
-#   IMPLEMENTATIONS    Comma-separated. Default: redpanda,versitygw,minio.
+#   IMPLEMENTATIONS    Comma-separated. Default: redpanda,versitygw,minio,fakegcs.
 #                      Each maps via $IMPL_DRIVER below to a driver.
 #   CONTROLLER_IMAGE   Cluster-side image reference the deployment is
 #                      patched to before rollout. Required.
@@ -59,7 +59,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 OVERLAYS_DIR="${OVERLAYS_DIR:-$HERE/overlays}"
 CONTROLLER_NS="${CONTROLLER_NS:-buckety}"
 KEEP_FAILED="${KEEP_FAILED:-false}"
-IMPLEMENTATIONS="${IMPLEMENTATIONS:-redpanda,versitygw,minio}"
+IMPLEMENTATIONS="${IMPLEMENTATIONS:-redpanda,versitygw,minio,fakegcs}"
 
 # Map implementation -> driver. Scenario discovery uses this to
 # pick which examples/<driver>/* to run for each implementation.
@@ -67,6 +67,7 @@ declare -A IMPL_DRIVER=(
   [redpanda]=kadm
   [versitygw]=s3
   [minio]=s3
+  [fakegcs]=gcs
 )
 
 log() { printf '[run.sh] %s\n' "$*" >&2; }

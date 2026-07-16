@@ -81,7 +81,7 @@ jobs:
         kubectl wait --for=condition=Ready node --all --timeout=120s
         kubectl get nodes
 
-    - name: Deploy backing services (Redpanda, VersityGW, MinIO)
+    - name: Deploy backing services (Redpanda, VersityGW, MinIO, fake-gcs-server)
       run: |
         set -euxo pipefail
         kubectl apply -k test/e2e/backing-services
@@ -90,6 +90,7 @@ jobs:
         kubectl -n redpanda rollout status statefulset/redpanda --timeout=300s
         kubectl -n blobs rollout status deploy/versitygw --timeout=180s
         kubectl -n blobs rollout status deploy/minio --timeout=180s
+        kubectl -n blobs rollout status deploy/fake-gcs --timeout=180s
 
     - name: Set up contain
       uses: solsson/setup-contain@49cc4cce1498df8a59e88fff52c1a9b747f11f08 # v1
@@ -138,7 +139,8 @@ jobs:
             -buildvcs=false \
             -ldflags "-s -w -X main.version=dv-${v} \
               -X github.com/Yolean/buckety-controller/pkg/drivers/kadm.version=${v} \
-              -X github.com/Yolean/buckety-controller/pkg/drivers/s3.version=${v}" \
+              -X github.com/Yolean/buckety-controller/pkg/drivers/s3.version=${v} \
+              -X github.com/Yolean/buckety-controller/pkg/drivers/gcs.version=${v}" \
             -o target/linux/amd64/buckety \
             ./cmd/buckety
           IMAGE="ghcr.io/yolean/buckety-controller:dv-${v}" \
@@ -149,7 +151,7 @@ jobs:
 
     - name: Run e2e harness
       env:
-        IMPLEMENTATIONS: redpanda,versitygw,minio
+        IMPLEMENTATIONS: redpanda,versitygw,minio,fakegcs
         OCI_DIR: ./oci
         # PUSH_AS reaches the k3d local registry via its host-published
         # port; CONTROLLER_IMAGE uses the same registry's in-cluster
@@ -172,6 +174,7 @@ jobs:
         kubectl -n redpanda describe pod -l app=redpanda || true
         kubectl -n blobs describe pod -l app=versitygw || true
         kubectl -n blobs describe pod -l app=minio || true
+        kubectl -n blobs describe pod -l app=fake-gcs || true
 
   # The image push job runs only on main-branch builds in the canonical
   # Yolean org with a successful e2e. It rebuilds (proves reproducibility),

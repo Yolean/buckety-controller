@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/pkg/config/schema/buckety-controller.schema.json
+# Same connection details as buckety-controller.yaml but with the
+# backend name changed from 'gcs' to 'gcs-renamed'. Used by the
+# gcs/backend-stickiness scenario to prove status.backend
+# stickiness survives a config rename.
+backends:
+
+- name: gcs-renamed
+  driver: gcs
+  config:
+    project: e2e-project
+    endpoint: http://fake-gcs.blobs.svc.cluster.local:8000
+    accessKeyID: e2e-fake-hmac-id
+    secretAccessKey: e2e-fake-hmac-secret
+  defaults:
+    zone: e2e
