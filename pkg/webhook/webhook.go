@@ -92,10 +92,15 @@ func (v *Validator) validateBuckety(_ context.Context, req admission.Request) ad
 		if err := json.Unmarshal(req.OldObject.Raw, &old); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		if err := backend.Driver.ValidateUpdateParameters(old.Spec.Parameters, bky.Spec.Parameters); err != nil {
+		// Merged views on both sides: dropping a CR key that a
+		// backend default also defines falls back to the default
+		// value, and that transition must pass immutability too.
+		if err := backend.Driver.ValidateUpdateParameters(
+			backend.EffectiveParameters(old.Spec.Parameters),
+			backend.EffectiveParameters(bky.Spec.Parameters)); err != nil {
 			return admission.Denied(fmt.Sprintf("spec.parameters: %v", err))
 		}
-	} else if err := backend.Driver.ValidateParameters(bky.Spec.Parameters); err != nil {
+	} else if err := backend.Driver.ValidateParameters(backend.EffectiveParameters(bky.Spec.Parameters)); err != nil {
 		return admission.Denied(fmt.Sprintf("spec.parameters: %v", err))
 	}
 

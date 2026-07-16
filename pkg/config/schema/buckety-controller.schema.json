@@ -21,7 +21,7 @@
           },
           "driver": {
             "type": "string",
-            "enum": ["kadm", "s3"],
+            "enum": ["kadm", "s3", "gcs"],
             "description": "Registered driver name. The compiled-in set for this repo's binary is kadm, s3 and gcs."
           },
           "config": {
@@ -32,6 +32,11 @@
             "type": "object",
             "additionalProperties": { "type": "string" },
             "description": "Cluster-operator-owned substitutions for ${backend.X} references in Buckety.spec.name templates (SPEC: Naming templates)."
+          },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Cluster-operator-owned parameter defaults, merged under Buckety.spec.parameters (the CR wins per key). Lets driver-specific parameters stay out of portable CRs (SPEC: Driver families). Validated against the driver at startup."
           }
         }
       }

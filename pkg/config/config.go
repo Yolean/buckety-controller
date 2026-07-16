@@ -29,13 +29,41 @@ type rawBackend struct {
 	Driver   string            `json:"driver"`
 	Config   json.RawMessage   `json:"config"`
 	Defaults map[string]string `json:"defaults,omitempty"`
+	// Parameters are operator-declared per-backend defaults for
+	// Buckety.spec.parameters, merged under each resource's own
+	// parameters (the CR wins per key). This is what keeps
+	// driver-specific knobs out of portable CRs (issue #17): a
+	// gcs backend declares location/uniformBucketLevelAccess here
+	// while the CR carries only family-common parameters.
+	Parameters map[string]string `json:"parameters,omitempty"`
 }
 
 // Backend is a resolved backend after driver factory invocation.
 type Backend struct {
-	Name     string
-	Driver   registry.Driver
-	Defaults map[string]string
+	Name       string
+	Driver     registry.Driver
+	Defaults   map[string]string
+	Parameters map[string]string
+}
+
+// EffectiveParameters merges the backend's parameter defaults
+// under the resource's own parameters; the resource wins per key.
+// Every validation and EnsureBuckety call operates on this merged
+// view, so removing a key from a CR falls back to the backend
+// default (and trips immutability checks if that changes an
+// immutable knob).
+func (b Backend) EffectiveParameters(crParams map[string]string) map[string]string {
+	if len(b.Parameters) == 0 {
+		return crParams
+	}
+	out := make(map[string]string, len(b.Parameters)+len(crParams))
+	for k, v := range b.Parameters {
+		out[k] = v
+	}
+	for k, v := range crParams {
+		out[k] = v
+	}
+	return out
 }
 
 // Loaded is the result of a successful Load.
@@ -72,10 +100,17 @@ func Load(dir string) (*Loaded, error) {
 		if err != nil {
 			return nil, fmt.Errorf("backends[%d] %q: %w", i, b.Name, err)
 		}
+		// Backend parameter defaults are validated at startup so a
+		// typo crash-loops with a config diagnostic instead of
+		// failing every resource at admission.
+		if err := drv.ValidateParameters(b.Parameters); err != nil {
+			return nil, fmt.Errorf("backends[%d] %q: parameters: %w", i, b.Name, err)
+		}
 		out.Backends[b.Name] = Backend{
-			Name:     b.Name,
-			Driver:   drv,
-			Defaults: b.Defaults,
+			Name:       b.Name,
+			Driver:     drv,
+			Defaults:   b.Defaults,
+			Parameters: b.Parameters,
 		}
 	}
 	return out, nil

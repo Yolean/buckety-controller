@@ -96,14 +96,14 @@ func TestValidateResourceName(t *testing.T) {
 	}
 
 	invalid := []string{
-		"ab",                     // too short
-		strings.Repeat("a", 64),  // too long
-		"Uppercase",              // charset
-		"-leading-dash",          // must start alphanumeric
-		"trailing-dash-",         // must end alphanumeric
-		"goog-prefixed",          // reserved prefix
-		"not-google-inside",      // reserved word
-		"192.168.0.1",            // IP shape
+		"ab",                    // too short
+		strings.Repeat("a", 64), // too long
+		"Uppercase",             // charset
+		"-leading-dash",         // must start alphanumeric
+		"trailing-dash-",        // must end alphanumeric
+		"goog-prefixed",         // reserved prefix
+		"not-google-inside",     // reserved word
+		"192.168.0.1",           // IP shape
 	}
 	for _, name := range invalid {
 		if err := d.ValidateResourceName(name); err == nil {

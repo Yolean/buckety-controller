@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -24,6 +26,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
 
+	"github.com/Yolean/buckety-controller/pkg/drivers/objectstore"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 	"github.com/Yolean/y-cluster/pkg/envsubst"
 	yaml "sigs.k8s.io/yaml"
@@ -119,27 +122,34 @@ func (d *Driver) Version() string { return version }
 // error rather than a false Ready=True over a bucket the consumer
 // cannot use.
 //
-// v1alpha1 has no driver-known mutable parameters for S3 buckets;
-// EnsureBuckety is a create-or-noop. Capability-gated parameters
-// (currently just R2's jurisdiction) are immutable at the
-// admission layer and are stamped via CreateBucketConfiguration
-// below.
+// After create-or-noop, the object-store family's mutable
+// parameters (versioning, lifecycle) are reconciled. A backend
+// that does not implement a family capability fails SAFE per SPEC
+// §Driver families: the bucket provisions, the knob is skipped
+// (e.g. MinIO without erasure coding has no versioning; retention
+// rules simply do not expire objects there). Capability-gated
+// parameters (R2's jurisdiction) are immutable at the admission
+// layer and are stamped via CreateBucketConfiguration below.
 func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) error {
 	input := &awss3.CreateBucketInput{Bucket: aws.String(req.Name)}
 	if cfg := bucketCreationConfig(d.cfg.Implementation, d.cfg.Region, req.Parameters); cfg != nil {
 		input.CreateBucketConfiguration = cfg
 	}
 	_, err := d.client.CreateBucket(ctx, input)
-	if err == nil || isAlreadyOwnedByYou(err) {
-		return nil
-	}
-	if isAlreadyExists(err) {
+	switch {
+	case err == nil || isAlreadyOwnedByYou(err):
+		// ours
+	case isAlreadyExists(err):
 		if _, herr := d.client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(req.Name)}); herr != nil {
 			return fmt.Errorf("s3: bucket %q exists but is not accessible with this backend's credentials (name likely taken by another account): %w", req.Name, herr)
 		}
-		return nil
+	default:
+		return fmt.Errorf("s3: create bucket %q: %w", req.Name, err)
 	}
-	return fmt.Errorf("s3: create bucket %q: %w", req.Name, err)
+	if err := d.reconcileVersioning(ctx, req.Name, req.Parameters); err != nil {
+		return err
+	}
+	return d.reconcileLifecycle(ctx, req.Name, req.Parameters)
 }
 
 // DeleteBuckety removes the backend bucket and its contents -
@@ -265,8 +275,10 @@ func (d *Driver) GrantAccess(_ context.Context, req registry.GrantRequest) (regi
 // there is no per-access principal).
 func (d *Driver) RevokeAccess(_ context.Context, _ string) error { return nil }
 
-// ValidateParameters honours the capability-gating contract:
-// jurisdiction is accepted only when implementation is r2.
+// ValidateParameters accepts the object-store family's common
+// parameters (versioning, lifecycle - see pkg/drivers/objectstore
+// and SPEC §Driver families) plus the capability-gated
+// jurisdiction (r2 only).
 func (d *Driver) ValidateParameters(params map[string]string) error {
 	for k, v := range params {
 		switch k {
@@ -277,8 +289,16 @@ func (d *Driver) ValidateParameters(params map[string]string) error {
 			if v != "eu" {
 				return fmt.Errorf("parameters.jurisdiction: only %q is supported in v0.1, got %q", "eu", v)
 			}
+		case "versioning":
+			if _, err := strconv.ParseBool(v); err != nil {
+				return fmt.Errorf("parameters.versioning: want \"true\" or \"false\", got %q", v)
+			}
+		case "lifecycle":
+			if _, err := translateLifecycle(v); err != nil {
+				return fmt.Errorf("parameters.lifecycle: %w", err)
+			}
 		default:
-			return fmt.Errorf("unknown parameter %q (s3 v0.1 accepts: jurisdiction when implementation=r2)", k)
+			return fmt.Errorf("unknown parameter %q (s3 accepts: versioning, lifecycle, and jurisdiction when implementation=r2)", k)
 		}
 	}
 	return nil
@@ -419,4 +439,193 @@ func isNotFound(err error) bool {
 		}
 	}
 	return false
+}
+
+// ---- object-store family parameters (versioning, lifecycle) ----
+
+// reconcileVersioning converges the versioning parameter when
+// present. NotImplemented from the backend is the family's
+// fail-safe: skip, do not fail the resource.
+func (d *Driver) reconcileVersioning(ctx context.Context, name string, params map[string]string) error {
+	v, ok := params["versioning"]
+	if !ok {
+		return nil
+	}
+	want, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("s3: parameters.versioning: %w", err)
+	}
+	got, err := d.client.GetBucketVersioning(ctx, &awss3.GetBucketVersioningInput{Bucket: aws.String(name)})
+	if err != nil {
+		if isNotImplemented(err) {
+			return nil
+		}
+		return fmt.Errorf("s3: get versioning for %q: %w", name, err)
+	}
+	current := got.Status == s3types.BucketVersioningStatusEnabled
+	if current == want {
+		return nil
+	}
+	if !want && got.Status == "" {
+		// Never-versioned bucket: S3 rejects an explicit Suspended
+		// on some implementations, and there is nothing to do.
+		return nil
+	}
+	status := s3types.BucketVersioningStatusSuspended
+	if want {
+		status = s3types.BucketVersioningStatusEnabled
+	}
+	_, err = d.client.PutBucketVersioning(ctx, &awss3.PutBucketVersioningInput{
+		Bucket:                  aws.String(name),
+		VersioningConfiguration: &s3types.VersioningConfiguration{Status: status},
+	})
+	if err != nil && !isNotImplemented(err) {
+		return fmt.Errorf("s3: set versioning=%v on %q: %w", want, name, err)
+	}
+	return nil
+}
+
+// reconcileLifecycle converges the lifecycle parameter when
+// present. {"rule": []} clears the configuration; NotImplemented
+// is the family's fail-safe skip.
+func (d *Driver) reconcileLifecycle(ctx context.Context, name string, params map[string]string) error {
+	doc, ok := params["lifecycle"]
+	if !ok {
+		return nil
+	}
+	desired, err := translateLifecycle(doc)
+	if err != nil {
+		return fmt.Errorf("s3: parameters.lifecycle: %w", err)
+	}
+	current, err := d.client.GetBucketLifecycleConfiguration(ctx, &awss3.GetBucketLifecycleConfigurationInput{Bucket: aws.String(name)})
+	var currentRules []s3types.LifecycleRule
+	switch {
+	case err == nil:
+		currentRules = current.Rules
+	case isNoLifecycle(err):
+		// no configuration yet
+	case isNotImplemented(err):
+		return nil
+	default:
+		return fmt.Errorf("s3: get lifecycle for %q: %w", name, err)
+	}
+	if lifecycleEqual(currentRules, desired) {
+		return nil
+	}
+	if len(desired) == 0 {
+		if _, err := d.client.DeleteBucketLifecycle(ctx, &awss3.DeleteBucketLifecycleInput{Bucket: aws.String(name)}); err != nil && !isNotImplemented(err) && !isNoLifecycle(err) {
+			return fmt.Errorf("s3: clear lifecycle on %q: %w", name, err)
+		}
+		return nil
+	}
+	_, err = d.client.PutBucketLifecycleConfiguration(ctx, &awss3.PutBucketLifecycleConfigurationInput{
+		Bucket:                 aws.String(name),
+		LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{Rules: desired},
+	})
+	if err != nil && !isNotImplemented(err) {
+		return fmt.Errorf("s3: set lifecycle on %q: %w", name, err)
+	}
+	return nil
+}
+
+// translateLifecycle maps the family's lifecycle shape to S3
+// rules. S3 expresses less than GCS, so the s3 driver supports
+// the PORTABLE SUBSET a cross-backend CR can rely on: action
+// Delete or AbortIncompleteMultipartUpload, condition age
+// (required) plus at most one matchesPrefix. Anything else is an
+// admission error naming the subset - silently dropping
+// conditions would delete more than the operator asked.
+func translateLifecycle(doc string) ([]s3types.LifecycleRule, error) {
+	rules, err := objectstore.ParseLifecycle(doc)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]s3types.LifecycleRule, 0, len(rules))
+	for i, r := range rules {
+		c := r.Condition
+		if c.Age == nil || *c.Age == 0 {
+			return nil, fmt.Errorf("rule[%d]: the s3 driver's portable subset requires condition.age >= 1", i)
+		}
+		if len(c.MatchesPrefix) > 1 {
+			return nil, fmt.Errorf("rule[%d]: S3 supports one prefix per rule; split into one rule per prefix", i)
+		}
+		if !c.CreatedBefore.IsZero() || !c.CustomTimeBefore.IsZero() || !c.NoncurrentTimeBefore.IsZero() ||
+			c.DaysSinceCustomTime != 0 || c.DaysSinceNoncurrentTime != 0 || c.IsLive != nil ||
+			len(c.MatchesStorageClass) != 0 || len(c.MatchesSuffix) != 0 || c.NumNewerVersions != 0 {
+			return nil, fmt.Errorf("rule[%d]: only age + matchesPrefix conditions are in the s3 driver's portable subset", i)
+		}
+		prefix := ""
+		if len(c.MatchesPrefix) == 1 {
+			prefix = c.MatchesPrefix[0]
+		}
+		rule := s3types.LifecycleRule{
+			ID:     aws.String(fmt.Sprintf("buckety-%d", i)),
+			Status: s3types.ExpirationStatusEnabled,
+			Filter: &s3types.LifecycleRuleFilter{Prefix: aws.String(prefix)},
+		}
+		switch r.Action.Type {
+		case "Delete":
+			rule.Expiration = &s3types.LifecycleExpiration{Days: aws.Int32(int32(*c.Age))}
+		case "AbortIncompleteMultipartUpload":
+			rule.AbortIncompleteMultipartUpload = &s3types.AbortIncompleteMultipartUpload{DaysAfterInitiation: aws.Int32(int32(*c.Age))}
+		default:
+			return nil, fmt.Errorf("rule[%d]: action %q is not in the s3 driver's portable subset (Delete, AbortIncompleteMultipartUpload)", i, r.Action.Type)
+		}
+		out = append(out, rule)
+	}
+	return out, nil
+}
+
+// lifecycleEqual compares configurations on the normalized tuples
+// the portable subset can express, ignoring rule IDs and ordering.
+func lifecycleEqual(a, b []s3types.LifecycleRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	key := func(r s3types.LifecycleRule) string {
+		prefix := ""
+		if r.Filter != nil && r.Filter.Prefix != nil {
+			prefix = *r.Filter.Prefix
+		} else if r.Prefix != nil {
+			prefix = *r.Prefix
+		}
+		exp, abort := int32(0), int32(0)
+		if r.Expiration != nil && r.Expiration.Days != nil {
+			exp = *r.Expiration.Days
+		}
+		if r.AbortIncompleteMultipartUpload != nil && r.AbortIncompleteMultipartUpload.DaysAfterInitiation != nil {
+			abort = *r.AbortIncompleteMultipartUpload.DaysAfterInitiation
+		}
+		return fmt.Sprintf("%s|%d|%d|%s", prefix, exp, abort, r.Status)
+	}
+	ka, kb := make([]string, len(a)), make([]string, len(b))
+	for i := range a {
+		ka[i] = key(a[i])
+	}
+	for i := range b {
+		kb[i] = key(b[i])
+	}
+	sort.Strings(ka)
+	sort.Strings(kb)
+	for i := range ka {
+		if ka[i] != kb[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// isNotImplemented reports a backend refusing an operation it
+// does not support (MinIO single-disk versioning, versitygw
+// lifecycle, ...) - the family's fail-safe skip trigger.
+func isNotImplemented(err error) bool {
+	var api smithy.APIError
+	return errors.As(err, &api) && (api.ErrorCode() == "NotImplemented" || api.ErrorCode() == "NotSupported")
+}
+
+// isNoLifecycle reports the absent-configuration case of
+// GetBucketLifecycleConfiguration.
+func isNoLifecycle(err error) bool {
+	var api smithy.APIError
+	return errors.As(err, &api) && api.ErrorCode() == "NoSuchLifecycleConfiguration"
 }

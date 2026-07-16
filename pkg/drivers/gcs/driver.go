@@ -52,6 +52,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 
+	"github.com/Yolean/buckety-controller/pkg/drivers/objectstore"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 	"github.com/Yolean/y-cluster/pkg/envsubst"
 	yaml "sigs.k8s.io/yaml"
@@ -635,121 +636,49 @@ func parseLabels(v string) (map[string]string, error) {
 	return out, nil
 }
 
-// ---- lifecycle JSON (gsutil `lifecycle set` shape) ----
+// ---- lifecycle translation ----
 
-// The parameter value is the same document `gsutil lifecycle set`
-// takes, so operators can move an existing policy file into the
-// Buckety verbatim:
-//
-//	{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 30}}]}
-//
-// Decoding is strict: unknown action types and condition fields
-// are admission errors, not silent drops.
-type lifecycleDoc struct {
-	Rule []lifecycleRule `json:"rule"`
-}
-
-type lifecycleRule struct {
-	Action    lifecycleAction    `json:"action"`
-	Condition lifecycleCondition `json:"condition"`
-}
-
-type lifecycleAction struct {
-	Type         string `json:"type"`
-	StorageClass string `json:"storageClass,omitempty"`
-}
-
-type lifecycleCondition struct {
-	Age                     *int64   `json:"age,omitempty"`
-	CreatedBefore           string   `json:"createdBefore,omitempty"`
-	CustomTimeBefore        string   `json:"customTimeBefore,omitempty"`
-	DaysSinceCustomTime     int64    `json:"daysSinceCustomTime,omitempty"`
-	DaysSinceNoncurrentTime int64    `json:"daysSinceNoncurrentTime,omitempty"`
-	IsLive                  *bool    `json:"isLive,omitempty"`
-	MatchesPrefix           []string `json:"matchesPrefix,omitempty"`
-	MatchesStorageClass     []string `json:"matchesStorageClass,omitempty"`
-	MatchesSuffix           []string `json:"matchesSuffix,omitempty"`
-	NoncurrentTimeBefore    string   `json:"noncurrentTimeBefore,omitempty"`
-	NumNewerVersions        int64    `json:"numNewerVersions,omitempty"`
-}
-
+// parseLifecycle translates the family-common lifecycle parameter
+// (objectstore.ParseLifecycle, gsutil shape) into the GCS client's
+// types. GCS expresses the full family surface natively.
 func parseLifecycle(doc string) (*storage.Lifecycle, error) {
-	dec := json.NewDecoder(strings.NewReader(doc))
-	dec.DisallowUnknownFields()
-	var parsed lifecycleDoc
-	if err := dec.Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("not a valid gsutil lifecycle document: %w", err)
-	}
-	if parsed.Rule == nil {
-		return nil, fmt.Errorf("not a valid gsutil lifecycle document: missing \"rule\" list (use {\"rule\": []} to clear all rules)")
+	rules, err := objectstore.ParseLifecycle(doc)
+	if err != nil {
+		return nil, err
 	}
 	out := &storage.Lifecycle{}
-	for i, r := range parsed.Rule {
-		rule := storage.LifecycleRule{}
-		switch r.Action.Type {
-		case "Delete", "AbortIncompleteMultipartUpload":
-			if r.Action.StorageClass != "" {
-				return nil, fmt.Errorf("rule[%d].action.storageClass is only valid with type SetStorageClass", i)
-			}
-			rule.Action.Type = r.Action.Type
-		case "SetStorageClass":
-			if r.Action.StorageClass == "" {
-				return nil, fmt.Errorf("rule[%d].action.storageClass is required with type SetStorageClass", i)
-			}
-			rule.Action.Type = r.Action.Type
-			rule.Action.StorageClass = r.Action.StorageClass
-		case "":
-			return nil, fmt.Errorf("rule[%d].action.type is required", i)
-		default:
-			return nil, fmt.Errorf("rule[%d].action.type %q is not one of Delete, SetStorageClass, AbortIncompleteMultipartUpload", i, r.Action.Type)
+	for _, r := range rules {
+		rule := storage.LifecycleRule{
+			Action: storage.LifecycleAction{Type: r.Action.Type, StorageClass: r.Action.StorageClass},
 		}
-		c := r.Condition
-		if c.Age != nil {
-			if *c.Age == 0 {
+		if r.Condition.Age != nil {
+			if *r.Condition.Age == 0 {
 				// The client library drops a zero AgeInDays; the
 				// documented way to match all objects is AllObjects.
 				rule.Condition.AllObjects = true
 			} else {
-				rule.Condition.AgeInDays = *c.Age
+				rule.Condition.AgeInDays = *r.Condition.Age
 			}
 		}
-		var err error
-		if rule.Condition.CreatedBefore, err = parseLifecycleDate(c.CreatedBefore, i, "createdBefore"); err != nil {
-			return nil, err
-		}
-		if rule.Condition.CustomTimeBefore, err = parseLifecycleDate(c.CustomTimeBefore, i, "customTimeBefore"); err != nil {
-			return nil, err
-		}
-		if rule.Condition.NoncurrentTimeBefore, err = parseLifecycleDate(c.NoncurrentTimeBefore, i, "noncurrentTimeBefore"); err != nil {
-			return nil, err
-		}
-		rule.Condition.DaysSinceCustomTime = c.DaysSinceCustomTime
-		rule.Condition.DaysSinceNoncurrentTime = c.DaysSinceNoncurrentTime
-		if c.IsLive != nil {
-			if *c.IsLive {
+		rule.Condition.CreatedBefore = r.Condition.CreatedBefore
+		rule.Condition.CustomTimeBefore = r.Condition.CustomTimeBefore
+		rule.Condition.NoncurrentTimeBefore = r.Condition.NoncurrentTimeBefore
+		rule.Condition.DaysSinceCustomTime = r.Condition.DaysSinceCustomTime
+		rule.Condition.DaysSinceNoncurrentTime = r.Condition.DaysSinceNoncurrentTime
+		if r.Condition.IsLive != nil {
+			if *r.Condition.IsLive {
 				rule.Condition.Liveness = storage.Live
 			} else {
 				rule.Condition.Liveness = storage.Archived
 			}
 		}
-		rule.Condition.MatchesPrefix = c.MatchesPrefix
-		rule.Condition.MatchesStorageClasses = c.MatchesStorageClass
-		rule.Condition.MatchesSuffix = c.MatchesSuffix
-		rule.Condition.NumNewerVersions = c.NumNewerVersions
+		rule.Condition.MatchesPrefix = r.Condition.MatchesPrefix
+		rule.Condition.MatchesStorageClasses = r.Condition.MatchesStorageClass
+		rule.Condition.MatchesSuffix = r.Condition.MatchesSuffix
+		rule.Condition.NumNewerVersions = r.Condition.NumNewerVersions
 		out.Rules = append(out.Rules, rule)
 	}
 	return out, nil
-}
-
-func parseLifecycleDate(v string, i int, field string) (time.Time, error) {
-	if v == "" {
-		return time.Time{}, nil
-	}
-	t, err := time.Parse("2006-01-02", v)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("rule[%d].condition.%s: want YYYY-MM-DD, got %q", i, field, v)
-	}
-	return t, nil
 }
 
 // ---- error classification ----

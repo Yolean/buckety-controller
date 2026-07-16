@@ -1,10 +1,19 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "s3 driver Buckety parameters",
-  "description": "Schema for Buckety.spec.parameters when the resolved driver is s3. v1alpha1 has no common-shape parameters; capability-gated parameters are honoured only when the backend declares the matching implementation discriminator.",
+  "description": "Schema for Buckety.spec.parameters when the resolved driver is s3. Omitted parameters are unmanaged: the driver never touches that knob on the backend. versioning and lifecycle are object-store family parameters shared with the gcs driver (SPEC: Driver families); a backend that answers NotImplemented for one of them is skipped fail-safe - the bucket still provisions. Capability-gated parameters are honoured only when the backend declares the matching implementation discriminator.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "versioning": {
+      "type": "string",
+      "enum": ["true", "false"],
+      "description": "Object versioning. Mutable; reconciled in place (\"false\" on an ever-versioned bucket suspends it). Skipped fail-safe when the backend does not implement versioning."
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Object lifecycle rules as a JSON document in the same shape `gsutil lifecycle set` takes - the object-store family's portable subset only: action Delete or AbortIncompleteMultipartUpload, condition age (required) plus at most one matchesPrefix. Anything outside the subset is an admission error; silently dropping conditions would delete more than asked. {\"rule\": []} clears all rules; omitting the parameter leaves rules unmanaged. Skipped fail-safe when the backend does not implement lifecycle configuration."
+    },
     "jurisdiction": {
       "type": "string",
       "enum": ["eu"],

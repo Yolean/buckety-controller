@@ -188,7 +188,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// (docs/SCAFFOLDING.md "Webhook TLS"); this is the promised
 	// fallback that surfaces invalid parameters on status instead of
 	// letting them travel to the backend as an opaque driver error.
-	if err := backend.Driver.ValidateParameters(bky.Spec.Parameters); err != nil {
+	// Validation and Ensure both operate on the merged view of
+	// backend parameter defaults + CR parameters (CR wins per key,
+	// see config.Backend.EffectiveParameters).
+	effective := backend.EffectiveParameters(bky.Spec.Parameters)
+	if err := backend.Driver.ValidateParameters(effective); err != nil {
 		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters",
 			corev1.EventTypeWarning, "InvalidParameters", err.Error())
 		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), bky.Generation)
@@ -200,7 +204,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionTrue, "Ensuring", "calling driver.EnsureBuckety", bky.Generation)
 	if err := backend.Driver.EnsureBuckety(ctx, registry.EnsureRequest{
 		Name:       bky.Status.BackendResourceName,
-		Parameters: bky.Spec.Parameters,
+		Parameters: effective,
 	}); err != nil {
 		if registry.IsParameterDrift(err) {
 			r.eventIfTransition(&bky, baseBky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable",
