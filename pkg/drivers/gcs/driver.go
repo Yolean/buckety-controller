@@ -83,10 +83,20 @@ type Config struct {
 	// Project is the GCP project buckets are created in.
 	Project string `json:"project"`
 	// Endpoint overrides the S3-interop endpoint written to access
-	// Secrets. Defaults to https://storage.googleapis.com. e2e sets
-	// it to the fake-gcs-server Service so consumers reach the same
-	// emulator the controller provisions against.
+	// Secrets. Defaults to https://storage.googleapis.com. Data
+	// planes with residency requirements should set the regional
+	// host matching their buckets' location
+	// (https://storage.<region>.rep.googleapis.com), from which
+	// SigV4 signing regions derive. e2e sets it to the
+	// fake-gcs-server Service so consumers reach the same emulator
+	// the controller provisions against.
 	Endpoint string `json:"endpoint,omitempty"`
+	// Region, when set, is written to access Secrets under the
+	// region key so consumers source their SigV4 signing region
+	// from the one Secret instead of deriving it from the
+	// endpoint. Should match the regional endpoint and the
+	// buckets' location parameter.
+	Region string `json:"region,omitempty"`
 	// AccessKeyID / SecretAccessKey are the static HMAC pair copied
 	// into every access Secret (see the package comment for why
 	// v0.1 does not mint per-access keys).
@@ -216,21 +226,26 @@ func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
 //
 // Secret keys per SPEC §Secret output > gcs driver:
 //
-//	endpoint, bucket, project, accessKeyID, secretAccessKey
+//	endpoint, bucket, project, region (if configured),
+//	accessKeyID, secretAccessKey
 //
 // `bucket` is the resource-type key per the SPEC's stable
 // per-driver convention.
 func (d *Driver) GrantAccess(_ context.Context, req registry.GrantRequest) (registry.GrantResult, error) {
+	data := map[string][]byte{
+		"endpoint":        []byte(d.cfg.Endpoint),
+		"bucket":          []byte(req.BucketyName),
+		"project":         []byte(d.cfg.Project),
+		"accessKeyID":     []byte(d.cfg.AccessKeyID),
+		"secretAccessKey": []byte(d.cfg.SecretAccessKey),
+	}
+	if d.cfg.Region != "" {
+		data["region"] = []byte(d.cfg.Region)
+	}
 	return registry.GrantResult{
-		SecretData: map[string][]byte{
-			"endpoint":        []byte(d.cfg.Endpoint),
-			"bucket":          []byte(req.BucketyName),
-			"project":         []byte(d.cfg.Project),
-			"accessKeyID":     []byte(d.cfg.AccessKeyID),
-			"secretAccessKey": []byte(d.cfg.SecretAccessKey),
-		},
-		Principal: "gcs-static",
-		Scoped:    false,
+		SecretData: data,
+		Principal:  "gcs-static",
+		Scoped:     false,
 	}, nil
 }
 
@@ -257,8 +272,16 @@ func (d *Driver) ValidateParameters(params map[string]string) error {
 			if _, err := parseLifecycle(v); err != nil {
 				return fmt.Errorf("parameters.lifecycle: %w", err)
 			}
+		case "softDeleteRetentionSeconds":
+			if _, err := parseSoftDeleteRetention(v); err != nil {
+				return fmt.Errorf("parameters.softDeleteRetentionSeconds: %w", err)
+			}
+		case "labels":
+			if _, err := parseLabels(v); err != nil {
+				return fmt.Errorf("parameters.labels: %w", err)
+			}
 		default:
-			return fmt.Errorf("unknown parameter %q (gcs v0.1 accepts: location, uniformBucketLevelAccess, versioning, lifecycle)", k)
+			return fmt.Errorf("unknown parameter %q (gcs v0.1 accepts: location, uniformBucketLevelAccess, versioning, lifecycle, softDeleteRetentionSeconds, labels)", k)
 		}
 	}
 	return nil
@@ -351,6 +374,20 @@ func attrsForCreate(params map[string]string) (*storage.BucketAttrs, error) {
 		}
 		attrs.Lifecycle = *lc
 	}
+	if v, ok := params["softDeleteRetentionSeconds"]; ok {
+		d, err := parseSoftDeleteRetention(v)
+		if err != nil {
+			return nil, fmt.Errorf("parameters.softDeleteRetentionSeconds: %w", err)
+		}
+		attrs.SoftDeletePolicy = &storage.SoftDeletePolicy{RetentionDuration: d}
+	}
+	if v, ok := params["labels"]; ok {
+		labels, err := parseLabels(v)
+		if err != nil {
+			return nil, fmt.Errorf("parameters.labels: %w", err)
+		}
+		attrs.Labels = labels
+	}
 	return attrs, nil
 }
 
@@ -391,10 +428,69 @@ func updateForDrift(params map[string]string, attrs *storage.BucketAttrs) (*stor
 			dirty = true
 		}
 	}
+	if v, ok := params["softDeleteRetentionSeconds"]; ok {
+		want, err := parseSoftDeleteRetention(v)
+		if err != nil {
+			return nil, fmt.Errorf("parameters.softDeleteRetentionSeconds: %w", err)
+		}
+		current := time.Duration(0)
+		if attrs.SoftDeletePolicy != nil {
+			current = attrs.SoftDeletePolicy.RetentionDuration
+		}
+		if current != want {
+			update.SoftDeletePolicy = &storage.SoftDeletePolicy{RetentionDuration: want}
+			dirty = true
+		}
+	}
+	if v, ok := params["labels"]; ok {
+		want, err := parseLabels(v)
+		if err != nil {
+			return nil, fmt.Errorf("parameters.labels: %w", err)
+		}
+		// Listed labels are converged to their declared values;
+		// labels absent from the parameter are unmanaged and never
+		// deleted - same posture as unlisted parameters.
+		for k2, v2 := range want {
+			if attrs.Labels[k2] != v2 {
+				update.SetLabel(k2, v2)
+				dirty = true
+			}
+		}
+	}
 	if !dirty {
 		return nil, nil
 	}
 	return &update, nil
+}
+
+// parseSoftDeleteRetention maps the parameter to
+// softDeletePolicy.retentionDurationSeconds. "0" disables soft
+// delete; GCS accepts enabled windows of 7 to 90 days only, so
+// out-of-range values are rejected here instead of surfacing as a
+// backend error after admission.
+func parseSoftDeleteRetention(v string) (time.Duration, error) {
+	secs, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("want seconds as an integer (\"0\" disables), got %q", v)
+	}
+	const week, ninetyDays = 7 * 24 * 60 * 60, 90 * 24 * 60 * 60
+	if secs != 0 && (secs < week || secs > ninetyDays) {
+		return 0, fmt.Errorf("GCS requires 0 (disabled) or %d..%d seconds (7 to 90 days), got %d", week, ninetyDays, secs)
+	}
+	return time.Duration(secs) * time.Second, nil
+}
+
+// parseLabels decodes the labels parameter, a JSON object of
+// string values. Key/value charset rules are the backend's to
+// enforce.
+func parseLabels(v string) (map[string]string, error) {
+	dec := json.NewDecoder(strings.NewReader(v))
+	dec.DisallowUnknownFields()
+	var out map[string]string
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("want a JSON object of string values, got %q: %w", v, err)
+	}
+	return out, nil
 }
 
 // ---- lifecycle JSON (gsutil `lifecycle set` shape) ----

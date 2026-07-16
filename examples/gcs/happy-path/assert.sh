@@ -3,7 +3,7 @@ set -euo pipefail
 . "${E2E_LIB:-$(cd "$(dirname "$0")/../../../test/e2e" && pwd)}/lib.sh"
 
 wait_ready buckety/orders 120s
-secret_has_keys orders-bucket endpoint bucket project accessKeyID secretAccessKey
+secret_has_keys orders-bucket endpoint bucket project region accessKeyID secretAccessKey
 
 bucket="$(secret_value orders-bucket bucket)"
 endpoint="$(secret_value orders-bucket endpoint)"

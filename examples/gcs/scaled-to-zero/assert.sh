@@ -3,7 +3,7 @@ set -euo pipefail
 . "${E2E_LIB:-$(cd "$(dirname "$0")/../../../test/e2e" && pwd)}/lib.sh"
 
 wait_ready buckety/dial-tone 120s
-secret_has_keys dial-tone-bucket endpoint bucket project accessKeyID secretAccessKey
+secret_has_keys dial-tone-bucket endpoint bucket project region accessKeyID secretAccessKey
 
 # Scale operator to zero before the consumer Job runs.
 log "scaling buckety-controller to 0 in $E2E_CONTROLLER_NS"

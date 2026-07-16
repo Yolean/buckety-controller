@@ -27,6 +27,17 @@ func TestValidateParameters(t *testing.T) {
 		t.Fatalf("empty parameters rejected: %v", err)
 	}
 
+	okMore := map[string]string{
+		"softDeleteRetentionSeconds": "604800",
+		"labels":                     `{"site": "tenant1", "managed-by": "buckety"}`,
+	}
+	if err := d.ValidateParameters(okMore); err != nil {
+		t.Fatalf("valid softDelete/labels rejected: %v", err)
+	}
+	if err := d.ValidateParameters(map[string]string{"softDeleteRetentionSeconds": "0"}); err != nil {
+		t.Fatalf("softDeleteRetentionSeconds=0 (disabled) rejected: %v", err)
+	}
+
 	cases := map[string]map[string]string{
 		"unknown key":     {"partitions": "3"},
 		"bad bool":        {"versioning": "yes please"},
@@ -37,6 +48,11 @@ func TestValidateParameters(t *testing.T) {
 		"no rule key":     {"lifecycle": `{}`},
 		"class w/ delete": {"lifecycle": `{"rule": [{"action": {"type": "Delete", "storageClass": "COLDLINE"}, "condition": {}}]}`},
 		"class missing":   {"lifecycle": `{"rule": [{"action": {"type": "SetStorageClass"}, "condition": {}}]}`},
+		"softdel string":  {"softDeleteRetentionSeconds": "7d"},
+		"softdel short":   {"softDeleteRetentionSeconds": "86400"}, // below the 7-day GCS minimum
+		"softdel long":    {"softDeleteRetentionSeconds": "31536000"},
+		"labels not obj":  {"labels": `["site"]`},
+		"labels non-str":  {"labels": `{"site": 3}`},
 	}
 	for name, params := range cases {
 		if err := d.ValidateParameters(params); err == nil {
@@ -129,6 +145,23 @@ func TestParseLifecycle(t *testing.T) {
 	}
 	if r1.Condition.NumNewerVersions != 3 {
 		t.Errorf("rule[1].numNewerVersions: %d", r1.Condition.NumNewerVersions)
+	}
+
+	// The blobs-per-org data plane's exact shape (checkit
+	// cluster-g2/buckety-controller/GCS_DRIVER_REQUIREMENTS_FROM_BLOBS.md
+	// must-have 3): multiple concurrent matchesPrefix rules.
+	blobs := `{"rule": [
+	  {"action": {"type": "Delete"}, "condition": {"age": 7, "matchesPrefix": ["board-prints/"]}},
+	  {"action": {"type": "Delete"}, "condition": {"age": 1, "matchesPrefix": [".staging/"]}}
+	]}`
+	lc, err = parseLifecycle(blobs)
+	if err != nil {
+		t.Fatalf("blobs-per-org two-rule lifecycle rejected: %v", err)
+	}
+	if len(lc.Rules) != 2 ||
+		lc.Rules[0].Condition.AgeInDays != 7 || lc.Rules[0].Condition.MatchesPrefix[0] != "board-prints/" ||
+		lc.Rules[1].Condition.AgeInDays != 1 || lc.Rules[1].Condition.MatchesPrefix[0] != ".staging/" {
+		t.Errorf("blobs-per-org lifecycle mistranslated: %+v", lc.Rules)
 	}
 
 	// Managed-empty clears rules; distinct from omitting the
@@ -227,6 +260,39 @@ func TestUpdateForDrift(t *testing.T) {
 	}
 	if up != nil {
 		t.Errorf("in-sync lifecycle produced an update: %+v", up)
+	}
+
+	// Soft delete: absent policy counts as 0, enabling produces an
+	// update, matching policy does not.
+	up, err = updateForDrift(map[string]string{"softDeleteRetentionSeconds": "604800"}, current)
+	if err != nil {
+		t.Fatalf("updateForDrift: %v", err)
+	}
+	if up == nil || up.SoftDeletePolicy == nil || up.SoftDeletePolicy.RetentionDuration != 7*24*time.Hour {
+		t.Errorf("soft-delete enable not reconciled: %+v", up)
+	}
+	current.SoftDeletePolicy = &storage.SoftDeletePolicy{RetentionDuration: 7 * 24 * time.Hour}
+	if up, err = updateForDrift(map[string]string{"softDeleteRetentionSeconds": "604800"}, current); err != nil || up != nil {
+		t.Errorf("in-sync soft delete produced update=%+v err=%v", up, err)
+	}
+	// GCS's default-on 7d policy is reverted when the resource
+	// declares 0.
+	up, err = updateForDrift(map[string]string{"softDeleteRetentionSeconds": "0"}, current)
+	if err != nil || up == nil || up.SoftDeletePolicy == nil || up.SoftDeletePolicy.RetentionDuration != 0 {
+		t.Errorf("soft-delete disable not reconciled: update=%+v err=%v", up, err)
+	}
+
+	// Labels: listed keys converge, unlisted keys are unmanaged.
+	current.Labels = map[string]string{"site": "old", "keepme": "untouched"}
+	up, err = updateForDrift(map[string]string{"labels": `{"site": "tenant1"}`}, current)
+	if err != nil {
+		t.Fatalf("updateForDrift: %v", err)
+	}
+	if up == nil {
+		t.Fatal("label drift not reconciled")
+	}
+	if up, err = updateForDrift(map[string]string{"labels": `{"site": "old"}`}, current); err != nil || up != nil {
+		t.Errorf("in-sync labels produced update=%+v err=%v", up, err)
 	}
 }
 

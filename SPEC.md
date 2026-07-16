@@ -655,9 +655,10 @@ metadata:
   namespace: tenant1
 type: Opaque
 data:
-  endpoint:        <base64>    # https://storage.googleapis.com (S3-interop data path)
+  endpoint:        <base64>    # S3-interop data path; regional (storage.<region>.rep.googleapis.com) where residency matters
   bucket:          <base64>    # tenant1-orders                (resource-type key)
   project:         <base64>    # the backend's GCP project
+  region:          <base64>    # SigV4 signing region (present when the backend configures it)
   accessKeyID:     <base64>
   secretAccessKey: <base64>
 ```

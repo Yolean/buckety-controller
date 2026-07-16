@@ -22,7 +22,15 @@
     },
     "lifecycle": {
       "type": "string",
-      "description": "Object lifecycle rules as a JSON document in the same shape `gsutil lifecycle set` takes: {\"rule\": [{\"action\": {\"type\": \"Delete\"}, \"condition\": {\"age\": 30}}]}. Action types: Delete, SetStorageClass (with storageClass), AbortIncompleteMultipartUpload. Condition fields: age, createdBefore, customTimeBefore, daysSinceCustomTime, daysSinceNoncurrentTime, isLive, matchesPrefix, matchesStorageClass, matchesSuffix, noncurrentTimeBefore, numNewerVersions. Mutable; reconciled in place. {\"rule\": []} clears all rules; omitting the parameter leaves rules unmanaged."
+      "description": "Object lifecycle rules as a JSON document in the same shape `gsutil lifecycle set` takes: {\"rule\": [{\"action\": {\"type\": \"Delete\"}, \"condition\": {\"age\": 30}}]}. Multiple concurrent rules are supported (e.g. distinct matchesPrefix retention classes). Action types: Delete, SetStorageClass (with storageClass), AbortIncompleteMultipartUpload. Condition fields: age, createdBefore, customTimeBefore, daysSinceCustomTime, daysSinceNoncurrentTime, isLive, matchesPrefix, matchesStorageClass, matchesSuffix, noncurrentTimeBefore, numNewerVersions. Mutable; reconciled in place. {\"rule\": []} clears all rules; omitting the parameter leaves rules unmanaged."
+    },
+    "softDeleteRetentionSeconds": {
+      "type": "string",
+      "description": "Soft delete window (softDeletePolicy.retentionDurationSeconds): how long deleted or overwritten objects remain restorable. \"0\" disables; GCS accepts enabled windows of 604800 to 7776000 seconds (7 to 90 days) only. Note GCS defaults NEW buckets to 7 days on - declare \"0\" to opt out, or a value to pin it against console drift. Mutable; reconciled in place. Cheap insurance against mass-delete with a compromised data-plane key, at the cost of also retaining intentionally lifecycle-deleted objects for the window."
+    },
+    "labels": {
+      "type": "string",
+      "description": "Bucket labels as a JSON object of string values, e.g. {\"site\": \"tenant1\", \"managed-by\": \"buckety\"}, for cost attribution and ownership. Listed labels are converged to their declared values; labels absent from the parameter are unmanaged and never deleted (same posture as unlisted parameters). Key/value charset rules are enforced by the backend."
     }
   }
 }

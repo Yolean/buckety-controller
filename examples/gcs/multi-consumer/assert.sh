@@ -5,7 +5,7 @@ set -euo pipefail
 wait_ready buckety/shared 120s
 for s in shared-reader shared-writer shared-rw; do
   wait_ready "bucketyaccess/$s" 60s
-  secret_has_keys "$s" endpoint bucket project accessKeyID secretAccessKey
+  secret_has_keys "$s" endpoint bucket project region accessKeyID secretAccessKey
 done
 
 b1="$(secret_value shared-reader bucket)"

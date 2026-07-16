@@ -188,6 +188,10 @@ backends:
   driver: gcs
   config:
     project: my-gcp-project
+    # Regional data-plane endpoint + signing region, written to
+    # access Secrets; match the buckets' location parameter.
+    endpoint: https://storage.europe-west4.rep.googleapis.com
+    region: europe-west4
     # Static S3-interop HMAC pair written to access Secrets;
     # mint out of band with: gcloud storage hmac create <sa-email>
     accessKeyID:     ${GCS_HMAC_ACCESS_ID}
