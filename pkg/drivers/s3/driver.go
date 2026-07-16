@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -616,9 +617,18 @@ func lifecycleEqual(a, b []s3types.LifecycleRule) bool {
 }
 
 // isNotImplemented reports a backend refusing an operation it
-// does not support (MinIO single-disk versioning, versitygw
-// lifecycle, ...) - the family's fail-safe skip trigger.
+// does not support - the family's fail-safe skip trigger. Error
+// codes vary per implementation (versitygw answers HTTP 501 with
+// its own VersioningNotConfigured code, for instance), so any
+// 501 response counts alongside the AWS-documented codes.
 func isNotImplemented(err error) bool {
+	// Interface target: the SDK wraps the smithy http response
+	// error in its own type, so a concrete *ResponseError match
+	// would miss it.
+	var httpErr interface{ HTTPStatusCode() int }
+	if errors.As(err, &httpErr) && httpErr.HTTPStatusCode() == http.StatusNotImplemented {
+		return true
+	}
 	var api smithy.APIError
 	return errors.As(err, &api) && (api.ErrorCode() == "NotImplemented" || api.ErrorCode() == "NotSupported")
 }

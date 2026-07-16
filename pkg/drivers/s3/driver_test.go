@@ -1,11 +1,15 @@
 package s3
 
 import (
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 func r2Driver() *Driver   { return &Driver{cfg: &Config{Implementation: "r2"}} }
@@ -196,5 +200,29 @@ func TestLifecycleEqual(t *testing.T) {
 	}
 	if lifecycleEqual(a, nil) {
 		t.Error("nil equal to non-empty")
+	}
+}
+
+// versitygw answers HTTP 501 with its own error code
+// (VersioningNotConfigured) rather than NotImplemented; the
+// fail-safe keys on the status code (seen live on run 29507386876).
+func TestIsNotImplemented(t *testing.T) {
+	versitygw501 := fmt.Errorf("operation error S3: GetBucketVersioning: %w",
+		&awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: 501}},
+			Err:      &smithy.GenericAPIError{Code: "VersioningNotConfigured", Message: "versioning has not been configured for the gateway"},
+		}})
+	if !isNotImplemented(versitygw501) {
+		t.Error("501 VersioningNotConfigured not treated as fail-safe skip")
+	}
+	if !isNotImplemented(&smithy.GenericAPIError{Code: "NotImplemented"}) {
+		t.Error("NotImplemented code not matched")
+	}
+	denied := fmt.Errorf("wrap: %w", &awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
+		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: 403}},
+		Err:      &smithy.GenericAPIError{Code: "AccessDenied"},
+	}})
+	if isNotImplemented(denied) {
+		t.Error("403 AccessDenied wrongly treated as not-implemented")
 	}
 }
