@@ -1,0 +1,8 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: bad-template
+spec:
+  backend: gcs
+  name: "${label['no.such/label']}-${name}"
+  retentionPolicy: Delete

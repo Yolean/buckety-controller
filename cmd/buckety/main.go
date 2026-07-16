@@ -40,6 +40,7 @@ import (
 	// Side-effect imports register driver factories with
 	// pkg/drivers/registry. The binary's driver set is exactly
 	// this import list.
+	_ "github.com/Yolean/buckety-controller/pkg/drivers/gcs"
 	_ "github.com/Yolean/buckety-controller/pkg/drivers/kadm"
 	_ "github.com/Yolean/buckety-controller/pkg/drivers/s3"
 )

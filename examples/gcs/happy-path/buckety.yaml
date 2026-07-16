@@ -1,0 +1,12 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: orders
+spec:
+  backend: gcs
+  retentionPolicy: Delete
+  parameters:
+    versioning: "true"
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: orders-bucket

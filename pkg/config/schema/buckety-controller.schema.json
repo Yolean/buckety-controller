@@ -22,7 +22,7 @@
           "driver": {
             "type": "string",
             "enum": ["kadm", "s3"],
-            "description": "Registered driver name. The compiled-in set for this repo's binary is kadm and s3."
+            "description": "Registered driver name. The compiled-in set for this repo's binary is kadm, s3 and gcs."
           },
           "config": {
             "type": "object",

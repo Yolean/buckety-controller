@@ -1,0 +1,6 @@
+backends:
+- name: gcs
+  driver: gcs
+  config:
+    accessKeyID: literal
+    secretAccessKey: literal

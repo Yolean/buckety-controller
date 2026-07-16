@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gcs driver Buckety parameters",
+  "description": "Schema for Buckety.spec.parameters when the resolved driver is gcs. All values are strings per the CRD contract. Omitted parameters are unmanaged: the driver never touches that knob on the backend and GCS's own defaults apply at creation (location US, uniform bucket-level access off, versioning off, no lifecycle rules).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "location": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Bucket location (e.g. EUROPE-WEST4, EU, US). Set at bucket creation, immutable post-create: buckets cannot move in place, so a location that disagrees with the backend surfaces ParameterDrift."
+    },
+    "uniformBucketLevelAccess": {
+      "type": "string",
+      "enum": ["true", "false"],
+      "description": "Uniform bucket-level access (IAM-only, no object ACLs). Recommended \"true\" for private gateway-fronted buckets. Mutable; note GCS only allows disabling within 90 days of enabling - a later disable surfaces as a reconcile error."
+    },
+    "versioning": {
+      "type": "string",
+      "enum": ["true", "false"],
+      "description": "Object versioning. Mutable; reconciled in place."
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Object lifecycle rules as a JSON document in the same shape `gsutil lifecycle set` takes: {\"rule\": [{\"action\": {\"type\": \"Delete\"}, \"condition\": {\"age\": 30}}]}. Multiple concurrent rules are supported (e.g. distinct matchesPrefix retention classes). Action types: Delete, SetStorageClass (with storageClass), AbortIncompleteMultipartUpload. Condition fields: age, createdBefore, customTimeBefore, daysSinceCustomTime, daysSinceNoncurrentTime, isLive, matchesPrefix, matchesStorageClass, matchesSuffix, noncurrentTimeBefore, numNewerVersions. Mutable; reconciled in place. {\"rule\": []} clears all rules; omitting the parameter leaves rules unmanaged."
+    },
+    "softDeleteRetentionSeconds": {
+      "type": "string",
+      "description": "Soft delete window (softDeletePolicy.retentionDurationSeconds): how long deleted or overwritten objects remain restorable. \"0\" disables; GCS accepts enabled windows of 604800 to 7776000 seconds (7 to 90 days) only. Note GCS defaults NEW buckets to 7 days on - declare \"0\" to opt out, or a value to pin it against console drift. Mutable; reconciled in place. Cheap insurance against mass-delete with a compromised data-plane key, at the cost of also retaining intentionally lifecycle-deleted objects for the window."
+    },
+    "labels": {
+      "type": "string",
+      "description": "Bucket labels as a JSON object of string values, e.g. {\"site\": \"tenant1\", \"managed-by\": \"buckety\"}, for cost attribution and ownership. Listed labels are converged to their declared values; labels absent from the parameter are unmanaged and never deleted (same posture as unlisted parameters). Key/value charset rules are enforced by the backend."
+    }
+  }
+}

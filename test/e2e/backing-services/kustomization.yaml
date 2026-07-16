@@ -5,3 +5,4 @@ resources:
 - redpanda.yaml
 - versitygw.yaml
 - minio.yaml
+- fakegcs.yaml

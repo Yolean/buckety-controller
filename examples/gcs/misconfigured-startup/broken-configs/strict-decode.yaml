@@ -1,0 +1,7 @@
+backends:
+- name: gcs
+  driver: gcs
+  config:
+    projcet: e2e-project
+    accessKeyID: literal
+    secretAccessKey: literal

@@ -1,0 +1,10 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: dial-tone
+spec:
+  backend: gcs
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: dial-tone-bucket

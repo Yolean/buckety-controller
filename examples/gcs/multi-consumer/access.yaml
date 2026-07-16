@@ -1,0 +1,29 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: shared-reader
+spec:
+  bucketyRef:
+    name: shared
+  credentialsSecretName: shared-reader
+  role: Reader
+---
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: shared-writer
+spec:
+  bucketyRef:
+    name: shared
+  credentialsSecretName: shared-writer
+  role: Writer
+---
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: shared-rw
+spec:
+  bucketyRef:
+    name: shared
+  credentialsSecretName: shared-rw
+  role: ReadWrite

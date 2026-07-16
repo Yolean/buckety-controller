@@ -1,0 +1,12 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: bad-name
+  labels:
+    # Legal as a label value, illegal in a GCS bucket name
+    # (uppercase).
+    yolean.se/generation: "V3.UP"
+spec:
+  backend: gcs
+  name: "${name}-${label['yolean.se/generation']}"
+  retentionPolicy: Delete

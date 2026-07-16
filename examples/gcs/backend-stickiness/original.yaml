@@ -1,0 +1,10 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: sticky-orig
+spec:
+  backend: gcs
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: sticky-orig-bucket

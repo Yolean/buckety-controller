@@ -1,0 +1,13 @@
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: sticky-new
+spec:
+  backend: gcs-renamed
+  # Retain: this Buckety outlives the renamed config (the scenario
+  # restores the original at the end), and retentionPolicy=Delete
+  # would block namespace cleanup on the then-missing backend.
+  retentionPolicy: Retain
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: sticky-new-bucket

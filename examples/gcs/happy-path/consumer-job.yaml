@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: orders-roundtrip
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: roundtrip
+        image: curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
+        env:
+        - name: GCS_ENDPOINT
+          valueFrom: { secretKeyRef: { name: orders-bucket, key: endpoint } }
+        - name: BUCKETY_BUCKET
+          valueFrom: { secretKeyRef: { name: orders-bucket, key: bucket } }
+        command: [sh, -ec]
+        args:
+        # JSON API round-trip: fake-gcs-server accepts it
+        # unauthenticated. Against real GCS this Job would use an
+        # S3 client with the Secret's HMAC pair instead (see
+        # examples/s3/happy-path/consumer-job.yaml for that shape).
+        - |
+          echo "hello-buckety" > /tmp/object.txt
+          curl -sfS -X POST \
+            "$GCS_ENDPOINT/upload/storage/v1/b/$BUCKETY_BUCKET/o?uploadType=media&name=probe.txt" \
+            -H "Content-Type: text/plain" \
+            --data-binary @/tmp/object.txt > /dev/null
+          curl -sfS \
+            "$GCS_ENDPOINT/storage/v1/b/$BUCKETY_BUCKET/o/probe.txt?alt=media" \
+            -o /tmp/back.txt
+          [ "$(cat /tmp/object.txt)" = "$(cat /tmp/back.txt)" ]
