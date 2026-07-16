@@ -7,7 +7,7 @@ kind: Kustomization
 resources:
 - ../base
 images:
-- digest: sha256:2d74ee589c94805c00feded93be578724a2b996ab67f207faee549d2fbc2dfcb
+- digest: sha256:fe97570e5eeca6612b30bd8d2e91d241523ebbebd373317171791d78c980d061
   name: ghcr.io/yolean/buckety-controller
   newName: ghcr.io/yolean/buckety-controller
-  newTag: 20260716T084703Z
+  newTag: 20260716T114555Z
