@@ -1,11 +1,15 @@
 package s3
 
 import (
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 func r2Driver() *Driver   { return &Driver{cfg: &Config{Implementation: "r2"}} }
@@ -136,5 +140,89 @@ func TestErrorClassification(t *testing.T) {
 	}
 	if isNotFound(other) {
 		t.Fatal("isNotFound over-matches")
+	}
+}
+
+// The object-store family parameters on the s3 driver: portable
+// subset translation and its rejections (SPEC §Driver families).
+func TestTranslateLifecyclePortableSubset(t *testing.T) {
+	rules, err := translateLifecycle(`{"rule": [
+	  {"action": {"type": "Delete"}, "condition": {"age": 7, "matchesPrefix": ["board-prints/"]}},
+	  {"action": {"type": "AbortIncompleteMultipartUpload"}, "condition": {"age": 2}}
+	]}`)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("rules: %d", len(rules))
+	}
+	if *rules[0].Expiration.Days != 7 || *rules[0].Filter.Prefix != "board-prints/" {
+		t.Errorf("rule[0]: %+v", rules[0])
+	}
+	if *rules[1].AbortIncompleteMultipartUpload.DaysAfterInitiation != 2 || *rules[1].Filter.Prefix != "" {
+		t.Errorf("rule[1]: %+v", rules[1])
+	}
+
+	for name, doc := range map[string]string{
+		"age required":  `{"rule": [{"action": {"type": "Delete"}, "condition": {"matchesPrefix": ["x/"]}}]}`,
+		"multi prefix":  `{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 1, "matchesPrefix": ["a/", "b/"]}}]}`,
+		"gcs-only cond": `{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 1, "isLive": false}}]}`,
+		"storage class": `{"rule": [{"action": {"type": "SetStorageClass", "storageClass": "COLDLINE"}, "condition": {"age": 1}}]}`,
+	} {
+		if _, err := translateLifecycle(doc); err == nil {
+			t.Errorf("%s: accepted outside portable subset", name)
+		}
+	}
+}
+
+func TestValidateParametersFamily(t *testing.T) {
+	d := &Driver{cfg: &Config{}}
+	if err := d.ValidateParameters(map[string]string{
+		"versioning": "true",
+		"lifecycle":  `{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 7, "matchesPrefix": [".staging/"]}}]}`,
+	}); err != nil {
+		t.Fatalf("family parameters rejected: %v", err)
+	}
+	if err := d.ValidateParameters(map[string]string{"versioning": "maybe"}); err == nil {
+		t.Error("bad versioning bool accepted")
+	}
+}
+
+func TestLifecycleEqual(t *testing.T) {
+	a, _ := translateLifecycle(`{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 7, "matchesPrefix": ["p/"]}}]}`)
+	b, _ := translateLifecycle(`{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 7, "matchesPrefix": ["p/"]}}]}`)
+	c, _ := translateLifecycle(`{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 8, "matchesPrefix": ["p/"]}}]}`)
+	if !lifecycleEqual(a, b) {
+		t.Error("identical configs unequal")
+	}
+	if lifecycleEqual(a, c) {
+		t.Error("different days equal")
+	}
+	if lifecycleEqual(a, nil) {
+		t.Error("nil equal to non-empty")
+	}
+}
+
+// versitygw answers HTTP 501 with its own error code
+// (VersioningNotConfigured) rather than NotImplemented; the
+// fail-safe keys on the status code (seen live on run 29507386876).
+func TestIsNotImplemented(t *testing.T) {
+	versitygw501 := fmt.Errorf("operation error S3: GetBucketVersioning: %w",
+		&awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: 501}},
+			Err:      &smithy.GenericAPIError{Code: "VersioningNotConfigured", Message: "versioning has not been configured for the gateway"},
+		}})
+	if !isNotImplemented(versitygw501) {
+		t.Error("501 VersioningNotConfigured not treated as fail-safe skip")
+	}
+	if !isNotImplemented(&smithy.GenericAPIError{Code: "NotImplemented"}) {
+		t.Error("NotImplemented code not matched")
+	}
+	denied := fmt.Errorf("wrap: %w", &awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
+		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: 403}},
+		Err:      &smithy.GenericAPIError{Code: "AccessDenied"},
+	}})
+	if isNotImplemented(denied) {
+		t.Error("403 AccessDenied wrongly treated as not-implemented")
 	}
 }

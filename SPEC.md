@@ -162,6 +162,12 @@ backends:
     secretAccessKey: ${VERSITYGW_ROOT_SECRETKEY}
   defaults:
     zone: local
+  # Optional per-backend parameter defaults, merged under each
+  # Buckety's spec.parameters (the CR wins per key). Keeps
+  # driver-specific parameters out of portable CRs; see Driver
+  # families. Validated against the driver at startup.
+  parameters:
+    versioning: "true"
 ```
 
 Credentials are sourced from env vars the controller Deployment
@@ -477,6 +483,59 @@ Adding a new capability-gated parameter is a minor driver
 version bump (per *Driver versioning*); the mechanism is the
 extension point for future per-backend features (MinIO ILM
 rules, AWS Object Lock retention, etc.).
+
+### Driver families
+
+Drivers that provision the same kind of service form a family
+and share parameter definitions, so one Buckety is portable
+across backends: the CR names a use-case backend (say
+`site-userdata-blobs`), carries only family-common parameters,
+and provisions whether the cluster's backend entry is `gcs` or
+`s3`. Families are per service kind; `kadm` shares nothing with
+the bucket drivers and is deliberately not in a family.
+
+The object-store family (`gcs`, `s3`) is defined in
+`pkg/drivers/objectstore`. Its family-common parameters:
+
+| Parameter | Semantics |
+| --- | --- |
+| `versioning` | `"true"` or `"false"`. Mutable, reconciled in place. |
+| `lifecycle` | JSON document in the `gsutil lifecycle set` shape. Portable CRs stick to the portable subset: action `Delete` or `AbortIncompleteMultipartUpload`, condition `age` (required) plus at most one `matchesPrefix`. The gcs driver accepts the full GCS condition set beyond the subset; the s3 driver rejects anything outside it at admission, because silently dropping a condition would delete more than the operator asked. |
+
+Three rules make portability hold:
+
+1. **Family-common parameters are accepted by every driver in
+   the family.** Rejecting one at admission is a driver bug, not
+   a capability statement.
+2. **Missing backend capability fails SAFE.** A backend that
+   answers NotImplemented for a family parameter (versitygw has
+   no versioning on its posix backend) is skipped: the bucket
+   still provisions and turns Ready, and nothing is deleted that
+   the operator did not ask deleted. Capability shortfalls are
+   deployment knowledge, not CR knowledge.
+3. **Driver-specific parameters live in the backend config, not
+   the CR.** Each backend entry takes an optional `parameters:`
+   map of per-cluster defaults (GCS `location`,
+   `uniformBucketLevelAccess`, `softDeleteRetentionSeconds`; R2
+   `jurisdiction`), merged under `spec.parameters` with the CR
+   winning per key. The merged result is what admission
+   validates and the driver receives, so immutability checks
+   (e.g. `location`) apply to backend defaults exactly as to CR
+   values. Backend defaults are validated against the driver at
+   startup.
+
+Backend `parameters:` defaults do not violate the "drivers MUST
+NOT have internal defaults" rule above: they are operator-owned
+cluster config, explicit and versioned with the deployment, not
+code that changes meaning on operator upgrade.
+
+The `examples/*/portable-blobs-cr/` scenario keeps the family
+honest in CI: a byte-identical CR (enforced by the asserts) is
+applied against minio, versitygw and the GCS emulator.
+
+Subfamily hierarchies (definitions shared by a subset of a
+family) are deferred until a third bucket driver forces the
+question; today the family is flat and small.
 
 ## Schemas
 

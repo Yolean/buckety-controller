@@ -29,3 +29,22 @@ backends:
     region: auto
     accessKeyID: not-used
     secretAccessKey: not-used
+
+# Use-case-named backend for examples/*/portable-blobs-cr/: the
+# byte-identical CR (backend: objects) provisions here and on every
+# other bucket-family implementation. versitygw's posix backend
+# cannot express versioning; the driver skips it fail-safe and the
+# bucket still provisions (SPEC "Driver families").
+- name: objects
+  driver: s3
+  config:
+    implementation: versitygw
+    endpoint: http://versitygw.blobs.svc.cluster.local:9000
+    region: us-east-1
+    forcePathStyle: true
+    accessKeyID:     ${VERSITYGW_ROOT_ACCESSKEY}
+    secretAccessKey: ${VERSITYGW_ROOT_SECRETKEY}
+  defaults:
+    zone: e2e
+  parameters:
+    versioning: "true"

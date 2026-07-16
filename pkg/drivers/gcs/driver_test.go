@@ -96,14 +96,14 @@ func TestValidateResourceName(t *testing.T) {
 	}
 
 	invalid := []string{
-		"ab",                     // too short
-		strings.Repeat("a", 64),  // too long
-		"Uppercase",              // charset
-		"-leading-dash",          // must start alphanumeric
-		"trailing-dash-",         // must end alphanumeric
-		"goog-prefixed",          // reserved prefix
-		"not-google-inside",      // reserved word
-		"192.168.0.1",            // IP shape
+		"ab",                    // too short
+		strings.Repeat("a", 64), // too long
+		"Uppercase",             // charset
+		"-leading-dash",         // must start alphanumeric
+		"trailing-dash-",        // must end alphanumeric
+		"goog-prefixed",         // reserved prefix
+		"not-google-inside",     // reserved word
+		"192.168.0.1",           // IP shape
 	}
 	for _, name := range invalid {
 		if err := d.ValidateResourceName(name); err == nil {
@@ -293,6 +293,30 @@ func TestUpdateForDrift(t *testing.T) {
 	}
 	if up, err = updateForDrift(map[string]string{"labels": `{"site": "old"}`}, current); err != nil || up != nil {
 		t.Errorf("in-sync labels produced update=%+v err=%v", up, err)
+	}
+}
+
+// Once any knob drifts, the update payload carries every managed
+// knob, drifted or not: a backend with replace-like update
+// semantics (fake-gcs-server resets fields absent from the
+// payload) must not un-converge settled values. Seen live as
+// portable-blobs-cr flaking on versioning (run 29509508991): the
+// emulator drops UBLA/lifecycle, the resulting perpetual drift
+// update wiped the already-correct versioning flag.
+func TestUpdateForDriftCarriesAllManagedKnobs(t *testing.T) {
+	current := &storage.BucketAttrs{VersioningEnabled: true}
+	up, err := updateForDrift(map[string]string{
+		"versioning":               "true",
+		"uniformBucketLevelAccess": "true",
+	}, current)
+	if err != nil {
+		t.Fatalf("updateForDrift: %v", err)
+	}
+	if up == nil || up.UniformBucketLevelAccess == nil || !up.UniformBucketLevelAccess.Enabled {
+		t.Fatalf("UBLA drift not reconciled: %+v", up)
+	}
+	if up.VersioningEnabled != true {
+		t.Errorf("undrifted managed versioning missing from update payload: %+v", up)
 	}
 }
 

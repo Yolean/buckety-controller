@@ -1,0 +1,23 @@
+# One CR for any bucket-family backend (SPEC "Driver families").
+# Everything in spec is family-common and the backend name
+# "objects" is use-case-named, not driver-named; this file is
+# byte-identical between examples/s3/portable-blobs-cr/ and
+# examples/gcs/portable-blobs-cr/ (assert.sh enforces it).
+# Driver-specific parameters belong on the backend entry in
+# buckety-controller.yaml, not here.
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: userdata
+spec:
+  backend: objects
+  retentionPolicy: Delete
+  parameters:
+    lifecycle: |
+      {"rule": [
+        {"action": {"type": "Delete"}, "condition": {"age": 7, "matchesPrefix": ["board-prints/"]}},
+        {"action": {"type": "Delete"}, "condition": {"age": 1, "matchesPrefix": [".staging/"]}}
+      ]}
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: userdata-blobs

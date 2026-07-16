@@ -18,3 +18,23 @@ backends:
     secretAccessKey: e2e-fake-hmac-secret
   defaults:
     zone: e2e
+
+# Use-case-named backend for examples/*/portable-blobs-cr/: the
+# byte-identical CR (backend: objects) provisions here and on every
+# other bucket-family implementation. Driver-specific defaults
+# (uniformBucketLevelAccess) live here rather than in the CR; the
+# emulator accepts but does not persist UBLA, while versioning is
+# persisted and asserted by the scenario.
+- name: objects
+  driver: gcs
+  config:
+    project: e2e-project
+    endpoint: fake-gcs.blobs.svc.cluster.local:8000
+    region: e2e-region-1
+    accessKeyID: e2e-fake-hmac-id
+    secretAccessKey: e2e-fake-hmac-secret
+  defaults:
+    zone: e2e
+  parameters:
+    versioning: "true"
+    uniformBucketLevelAccess: "true"
