@@ -48,7 +48,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/iterator"
 
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 	"github.com/Yolean/y-cluster/pkg/envsubst"
@@ -207,16 +209,109 @@ func (d *Driver) reconcileExisting(ctx context.Context, bkt *storage.BucketHandl
 	return nil
 }
 
-// DeleteBuckety removes the bucket. Idempotent on NotFound.
-// Buckets must be empty for deletion to succeed; v1alpha1 does not
-// empty the bucket on the operator's behalf - same posture as the
-// s3 driver.
+// DeleteBuckety removes the bucket and its contents -
+// PersistentVolume reclaimPolicy=Delete semantics per SPEC
+// §Lifecycle and deletion. Idempotent on NotFound.
+//
+// Contents (including archived generations on versioned buckets)
+// are emptied in bounded slices with a small worker pool;
+// ErrDeletionInProgress tells the controller to requeue promptly.
+// Objects the data plane protected with holds or retention refuse
+// deletion and block the Buckety with an error naming them - that
+// protection is the design's guard against a bad Delete, not an
+// obstacle to work around. Soft-deleted objects do not block
+// bucket deletion; with a soft delete policy the bucket itself
+// remains restorable for the configured window.
 func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
-	err := d.client.Bucket(name).Delete(ctx)
+	live, err := d.emptyBucketSlice(ctx, name)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotExist) || isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("gcs: empty bucket %q for deletion: %w", name, err)
+	}
+	if live > 0 {
+		return &registry.ErrDeletionInProgress{Progress: fmt.Sprintf("bucket %q: deleted %d objects, checking for more", name, live)}
+	}
+	err = d.client.Bucket(name).Delete(ctx)
 	if err == nil || errors.Is(err, storage.ErrBucketNotExist) || isNotFound(err) {
 		return nil
 	}
+	if isConflict(err) {
+		// 409 conflict: not empty - archived generations remain (the
+		// slice attempts them best-effort) or a writer raced; the
+		// next pass picks up whatever the backend still lists.
+		return &registry.ErrDeletionInProgress{Progress: fmt.Sprintf("bucket %q: still not empty after emptying pass", name)}
+	}
 	return fmt.Errorf("gcs: delete bucket %q: %w", name, err)
+}
+
+// emptyDeleteSliceSize bounds objects deleted per DeleteBuckety
+// call, and emptyDeleteWorkers bounds concurrent DeleteObject
+// calls (GCS has no batch-delete API).
+const (
+	emptyDeleteSliceSize = 256
+	emptyDeleteWorkers   = 16
+)
+
+// emptyBucketSlice deletes up to emptyDeleteSliceSize object
+// generations (Versions: true covers live and archived) and
+// returns how many LIVE generations were deleted. Only live
+// generations count as remaining work: deleting an archived
+// generation is best-effort because backends diverge - real GCS
+// removes it permanently (and requires this for the bucket to
+// become deletable), while fake-gcs-server keeps a tombstone
+// listed forever and 404s repeat deletes. Counting those
+// tombstones would spin the in-progress loop without converging;
+// the bucket delete that follows is the arbiter of actually
+// empty.
+func (d *Driver) emptyBucketSlice(ctx context.Context, name string) (int, error) {
+	bkt := d.client.Bucket(name)
+	it := bkt.Objects(ctx, &storage.Query{Versions: true})
+
+	type target struct {
+		key  string
+		gen  int64
+		live bool
+	}
+	var targets []target
+	live := 0
+	for len(targets) < emptyDeleteSliceSize {
+		attrs, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+		isLive := attrs.Deleted.IsZero()
+		if isLive {
+			live++
+		}
+		targets = append(targets, target{key: attrs.Name, gen: attrs.Generation, live: isLive})
+	}
+	if len(targets) == 0 {
+		return 0, nil
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(emptyDeleteWorkers)
+	for _, t := range targets {
+		g.Go(func() error {
+			err := bkt.Object(t.key).Generation(t.gen).Delete(gctx)
+			if err == nil || errors.Is(err, storage.ErrObjectNotExist) {
+				return nil
+			}
+			if isForbidden(err) {
+				return fmt.Errorf("object %q (generation %d) refuses deletion - likely under a hold or retention placed by the data plane; release it to let the Buckety go: %w", t.key, t.gen, err)
+			}
+			return fmt.Errorf("delete object %q: %w", t.key, err)
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return 0, err
+	}
+	return live, nil
 }
 
 // GrantAccess returns the gcs Secret payload for a BucketyAccess:

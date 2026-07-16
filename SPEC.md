@@ -527,8 +527,9 @@ call, guided by the chosen operator SDK.
 - `EnsureBuckety` — idempotent create-or-update against the
   backend; reconciles drift on every call; returns the
   backend-side name and any driver-specific status hints.
-- `DeleteBuckety` — drops the backend resource, idempotent on
-  NotFound; called only when `retentionPolicy == Delete`.
+- `DeleteBuckety` — drops the backend resource and its contents
+  (see *`Delete` is recursive*), idempotent on NotFound; called
+  only when `retentionPolicy == Delete`.
 - `GrantAccess` — mints credentials, applies backend-side
   permissions (no-op in v1alpha1 for both shipped drivers),
   returns the Secret payload as a flat `map[string][]byte`.
@@ -692,6 +693,36 @@ Key names stay the same when scoped credentials land.
   them; it surfaces a `BlockedByAccesses` condition with the
   offending names — and (b) `DeleteBuckety` succeeding if
   `retentionPolicy == Delete`.
+
+### `Delete` is recursive
+
+`retentionPolicy: Delete` removes the backend resource AND its
+contents — the same promise as PersistentVolume
+`reclaimPolicy: Delete`, and what the `kadm` driver has always
+done (deleting a topic deletes its records). A Delete that blocks
+on non-empty contents would instead wedge namespace teardown on
+the resource's finalizer.
+
+Semantics:
+
+- Drivers empty contents in bounded slices, returning a typed
+  in-progress signal between slices; the controller surfaces
+  progress via a `Ready=False/DeletingContents` condition and
+  requeues promptly. Deletion of large resources is resumable
+  across controller restarts.
+- Store-level protections the data plane placed on individual
+  items (GCS object holds, retention policies) are honoured, not
+  fought: deletion blocks with an error naming the protected
+  items until they are released. Those protections — plus GCS
+  soft delete, which keeps a recursively-deleted bucket
+  restorable for its configured window — are the guardrails for
+  the recursive semantics; there is no `DeleteIfEmpty` middle
+  value and no extra admission ceremony for flipping
+  `Retain -> Delete` (the flip alone deletes nothing).
+- A resource under sustained concurrent writes is chased, not
+  declared failed: each pass deletes what the backend listed.
+- `Retain` (the default) never touches the backend on CR
+  deletion, contents or not.
 
 ## End-to-end coverage — write this section first
 
