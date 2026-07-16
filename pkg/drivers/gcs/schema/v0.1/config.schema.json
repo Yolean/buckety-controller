@@ -13,11 +13,11 @@
     },
     "endpoint": {
       "type": "string",
-      "description": "S3-interop endpoint written to access Secrets. Defaults to https://storage.googleapis.com. Data planes with residency requirements should set the regional host matching the buckets' location, https://storage.<region>.rep.googleapis.com, from which SigV4 signing regions derive. Also override for emulators (fake-gcs-server) so consumers reach the same endpoint the controller provisions against; the control plane itself follows ADC/STORAGE_EMULATOR_HOST, not this field."
+      "description": "Overrides the S3-interop endpoint written to access Secrets, as a BARE host without scheme (consumers choose the scheme; a scheme here is a startup error). Normally unset: the driver derives the endpoint per bucket from its location - storage.<region>.rep.googleapis.com for regional buckets (in-region data path), storage.googleapis.com for multi-regions. Set for emulators (fake-gcs-server) so consumers reach the same endpoint the controller provisions against; the control plane itself follows ADC/STORAGE_EMULATOR_HOST, not this field."
     },
     "region": {
       "type": "string",
-      "description": "Optional SigV4 signing region written to access Secrets under the region key, so consumers source it from the one Secret instead of deriving it from the endpoint hostname. Should match the regional endpoint and the buckets' location parameter (e.g. europe-west4)."
+      "description": "Overrides the SigV4 signing region written to access Secrets under the region key. Normally unset: derived per bucket from its location alongside the endpoint (lowercased region for regional buckets; omitted for multi-regions)."
     },
     "accessKeyID": {
       "type": "string",

@@ -171,7 +171,9 @@ resource_absent() {
 
 # gcs_api <url>
 # GETs the URL via an ephemeral curl pod, echoing the body.
-# Returns non-zero on HTTP >= 400 (curl -f).
+# Returns non-zero on HTTP >= 400 (curl -f). Secret endpoint
+# values are bare hosts (schemes are the consumer's choice);
+# these emulator-coupled helpers speak plain http.
 gcs_api() {
   kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
     --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
@@ -185,7 +187,7 @@ gcs_bucket_exists() {
   local bucket="$1" endpoint="$2"
   log "verifying GCS bucket '$bucket' at $endpoint"
   local out
-  if ! out="$(gcs_api "$endpoint/storage/v1/b/$bucket")"; then
+  if ! out="$(gcs_api "http://$endpoint/storage/v1/b/$bucket")"; then
     printf '%s\n' "$out" >&2
     fail "GCS bucket '$bucket' not found at $endpoint"
   fi
@@ -195,7 +197,7 @@ gcs_bucket_exists() {
 # Existence probe without failing the scenario; for polling loops
 # and negative assertions.
 gcs_bucket_exists_quiet() {
-  gcs_api "$2/storage/v1/b/$1" >/dev/null 2>&1
+  gcs_api "http://$2/storage/v1/b/$1" >/dev/null 2>&1
 }
 
 # gcs_bucket_delete <bucket> <endpoint>
@@ -205,7 +207,7 @@ gcs_bucket_delete() {
   kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
     --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
     "curl-oob-$RANDOM" -- \
-    -sfS -X DELETE "$endpoint/storage/v1/b/$bucket" </dev/null
+    -sfS -X DELETE "http://$endpoint/storage/v1/b/$bucket" </dev/null
 }
 
 # gcs_bucket_versioning_enabled <bucket> <endpoint>
@@ -215,7 +217,7 @@ gcs_bucket_delete() {
 gcs_bucket_versioning_enabled() {
   local bucket="$1" endpoint="$2"
   local out
-  out="$(gcs_api "$endpoint/storage/v1/b/$bucket")" || {
+  out="$(gcs_api "http://$endpoint/storage/v1/b/$bucket")" || {
     printf '%s\n' "$out" >&2
     fail "GCS bucket '$bucket' not readable at $endpoint"
   }
@@ -244,5 +246,5 @@ gcs_object_put() {
     -sfS -o /dev/null -X POST \
     -H "Content-Type: text/plain" \
     --data-raw "$content" \
-    "$endpoint/upload/storage/v1/b/$bucket/o?uploadType=media&name=$key" </dev/null
+    "http://$endpoint/upload/storage/v1/b/$bucket/o?uploadType=media&name=$key" </dev/null
 }

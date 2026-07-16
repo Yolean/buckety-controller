@@ -67,11 +67,13 @@ const DriverName = "gcs"
 // per SPEC §Driver versioning. Default keeps tests building.
 var version = "0.1.0"
 
-// defaultEndpoint is the public S3-interop endpoint written to
-// access Secrets when the backend config does not override it.
-// This is connection metadata for consumers, not a parameter
-// default: the control plane never uses it.
-const defaultEndpoint = "https://storage.googleapis.com"
+// globalEndpoint is the S3-interop host written to access
+// Secrets for buckets whose location has no locational endpoint
+// (multi-regions like EU/US, dual-region codes). Endpoint values
+// are BARE hosts per s3-config convention - the scheme is the
+// consumer's choice (issue #14: a scheme'd value produced
+// https://https://... at a consumer that prepends).
+const globalEndpoint = "storage.googleapis.com"
 
 func init() {
 	registry.Register(DriverName, version, factory)
@@ -84,20 +86,17 @@ func init() {
 type Config struct {
 	// Project is the GCP project buckets are created in.
 	Project string `json:"project"`
-	// Endpoint overrides the S3-interop endpoint written to access
-	// Secrets. Defaults to https://storage.googleapis.com. Data
-	// planes with residency requirements should set the regional
-	// host matching their buckets' location
-	// (https://storage.<region>.rep.googleapis.com), from which
-	// SigV4 signing regions derive. e2e sets it to the
-	// fake-gcs-server Service so consumers reach the same emulator
-	// the controller provisions against.
+	// Endpoint overrides the S3-interop endpoint written to
+	// access Secrets, as a BARE host (no scheme). When unset -
+	// the normal case - the driver derives the endpoint per
+	// bucket from its location: storage.<region>.rep.googleapis.com
+	// for regional buckets, storage.googleapis.com otherwise.
+	// Override for emulators (fake-gcs-server) so consumers reach
+	// the same emulator the controller provisions against.
 	Endpoint string `json:"endpoint,omitempty"`
-	// Region, when set, is written to access Secrets under the
-	// region key so consumers source their SigV4 signing region
-	// from the one Secret instead of deriving it from the
-	// endpoint. Should match the regional endpoint and the
-	// buckets' location parameter.
+	// Region overrides the SigV4 signing region written to access
+	// Secrets under the region key. When unset it is derived from
+	// each bucket's location alongside the endpoint.
 	Region string `json:"region,omitempty"`
 	// AccessKeyID / SecretAccessKey are the static HMAC pair copied
 	// into every access Secret (see the package comment for why
@@ -123,8 +122,8 @@ func factory(raw json.RawMessage) (registry.Driver, error) {
 	if c.SecretAccessKey == "" {
 		return nil, fmt.Errorf("gcs config: missing required field %q", "secretAccessKey")
 	}
-	if c.Endpoint == "" {
-		c.Endpoint = defaultEndpoint
+	if strings.Contains(c.Endpoint, "://") {
+		return nil, fmt.Errorf("gcs config: endpoint %q must be a bare host without scheme; consumers choose the scheme", c.Endpoint)
 	}
 
 	// ADC resolution happens here, so a controller without
@@ -223,14 +222,22 @@ func (d *Driver) reconcileExisting(ctx context.Context, bkt *storage.BucketHandl
 // bucket deletion; with a soft delete policy the bucket itself
 // remains restorable for the configured window.
 func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
+	noList := false
 	live, err := d.emptyBucketSlice(ctx, name)
-	if err != nil {
+	switch {
+	case errors.Is(err, errNoListPermission):
+		// A provisioning credential without storage.objects.list
+		// (the bucket-CRUD-only day-one role) cannot empty; plain
+		// bucket delete below still handles the empty-bucket case,
+		// and the non-empty case gets an actionable error instead
+		// of an in-progress loop that never converges.
+		noList = true
+	case err != nil:
 		if errors.Is(err, storage.ErrBucketNotExist) || isNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("gcs: empty bucket %q for deletion: %w", name, err)
-	}
-	if live > 0 {
+	case live > 0:
 		return &registry.ErrDeletionInProgress{Progress: fmt.Sprintf("bucket %q: deleted %d objects, checking for more", name, live)}
 	}
 	err = d.client.Bucket(name).Delete(ctx)
@@ -238,6 +245,9 @@ func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
 		return nil
 	}
 	if isConflict(err) {
+		if noList {
+			return fmt.Errorf("gcs: bucket %q is not empty and the controller's credentials lack storage.objects.list, so it cannot be emptied; grant storage.objects.list + storage.objects.delete (retentionPolicy=Delete is recursive) or drain the bucket out of band", name)
+		}
 		// 409 conflict: not empty - archived generations remain (the
 		// slice attempts them best-effort) or a writer raced; the
 		// next pass picks up whatever the backend still lists.
@@ -245,6 +255,10 @@ func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
 	}
 	return fmt.Errorf("gcs: delete bucket %q: %w", name, err)
 }
+
+// errNoListPermission marks an emptying pass refused at the
+// object listing itself.
+var errNoListPermission = errors.New("no storage.objects.list permission")
 
 // emptyDeleteSliceSize bounds objects deleted per DeleteBuckety
 // call, and emptyDeleteWorkers bounds concurrent DeleteObject
@@ -280,6 +294,9 @@ func (d *Driver) emptyBucketSlice(ctx context.Context, name string) (int, error)
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {
 			break
+		}
+		if isForbidden(err) {
+			return 0, fmt.Errorf("%w: %w", errNoListPermission, err)
 		}
 		if err != nil {
 			return 0, err
@@ -321,27 +338,57 @@ func (d *Driver) emptyBucketSlice(ctx context.Context, name string) (int, error)
 //
 // Secret keys per SPEC §Secret output > gcs driver:
 //
-//	endpoint, bucket, project, region (if configured),
+//	endpoint, bucket, project, region (when known),
 //	accessKeyID, secretAccessKey
 //
 // `bucket` is the resource-type key per the SPEC's stable
-// per-driver convention.
-func (d *Driver) GrantAccess(_ context.Context, req registry.GrantRequest) (registry.GrantResult, error) {
+// per-driver convention. endpoint/region are derived from the
+// bucket's location unless the backend config overrides them
+// (issue #14: signing for a EUROPE-WEST4 bucket against the
+// global host breaks SigV4 and data residency).
+func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (registry.GrantResult, error) {
+	endpoint, region := d.cfg.Endpoint, d.cfg.Region
+	if endpoint == "" {
+		attrs, err := d.client.Bucket(req.BucketyName).Attrs(ctx)
+		if err != nil {
+			return registry.GrantResult{}, fmt.Errorf("gcs: resolve endpoint for bucket %q: %w", req.BucketyName, err)
+		}
+		endpoint, region = locationEndpoint(attrs.Location)
+		if d.cfg.Region != "" {
+			region = d.cfg.Region
+		}
+	}
 	data := map[string][]byte{
-		"endpoint":        []byte(d.cfg.Endpoint),
+		"endpoint":        []byte(endpoint),
 		"bucket":          []byte(req.BucketyName),
 		"project":         []byte(d.cfg.Project),
 		"accessKeyID":     []byte(d.cfg.AccessKeyID),
 		"secretAccessKey": []byte(d.cfg.SecretAccessKey),
 	}
-	if d.cfg.Region != "" {
-		data["region"] = []byte(d.cfg.Region)
+	if region != "" {
+		data["region"] = []byte(region)
 	}
 	return registry.GrantResult{
 		SecretData: data,
 		Principal:  "gcs-static",
 		Scoped:     false,
 	}, nil
+}
+
+// locationEndpoint maps a bucket location to its S3-interop bare
+// host and SigV4 signing region. Regional locations (the ones
+// containing a dash, e.g. EUROPE-WEST4) have locational
+// endpoints, storage.<region>.rep.googleapis.com, which keep
+// requests in-region. Multi-regions (EU, US, ASIA) and
+// dual-region codes have none; those fall back to the global
+// host with no region key, leaving the signing region the
+// consumer's choice.
+func locationEndpoint(location string) (endpoint, region string) {
+	l := strings.ToLower(location)
+	if strings.Contains(l, "-") {
+		return "storage." + l + ".rep.googleapis.com", l
+	}
+	return globalEndpoint, ""
 }
 
 // RevokeAccess is a no-op in v0.1 (nothing to remove since there

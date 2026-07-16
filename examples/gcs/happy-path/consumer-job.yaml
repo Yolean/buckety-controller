@@ -24,10 +24,10 @@ spec:
         - |
           echo "hello-buckety" > /tmp/object.txt
           curl -sfS -X POST \
-            "$GCS_ENDPOINT/upload/storage/v1/b/$BUCKETY_BUCKET/o?uploadType=media&name=probe.txt" \
+            "http://$GCS_ENDPOINT/upload/storage/v1/b/$BUCKETY_BUCKET/o?uploadType=media&name=probe.txt" \
             -H "Content-Type: text/plain" \
             --data-binary @/tmp/object.txt > /dev/null
           curl -sfS \
-            "$GCS_ENDPOINT/storage/v1/b/$BUCKETY_BUCKET/o/probe.txt?alt=media" \
+            "http://$GCS_ENDPOINT/storage/v1/b/$BUCKETY_BUCKET/o/probe.txt?alt=media" \
             -o /tmp/back.txt
           [ "$(cat /tmp/object.txt)" = "$(cat /tmp/back.txt)" ]

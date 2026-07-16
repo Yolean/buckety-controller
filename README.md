@@ -188,15 +188,17 @@ backends:
   driver: gcs
   config:
     project: my-gcp-project
-    # Regional data-plane endpoint + signing region, written to
-    # access Secrets; match the buckets' location parameter.
-    endpoint: https://storage.europe-west4.rep.googleapis.com
-    region: europe-west4
     # Static S3-interop HMAC pair written to access Secrets;
     # mint out of band with: gcloud storage hmac create <sa-email>
     accessKeyID:     ${GCS_HMAC_ACCESS_ID}
     secretAccessKey: ${GCS_HMAC_SECRET}
 ```
+
+Access Secrets carry the S3-interop `endpoint` (a bare host - the
+scheme is the consumer's choice) and `region`, derived per bucket
+from its location: `storage.<region>.rep.googleapis.com` for
+regional buckets, the global host for multi-regions. Config
+`endpoint`/`region` overrides exist for emulators.
 
 The gcs control plane authenticates separately, via Application
 Default Credentials: mount a service-account JSON key and set
