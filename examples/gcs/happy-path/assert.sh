@@ -4,6 +4,7 @@ set -euo pipefail
 
 wait_ready buckety/orders 120s
 secret_has_keys orders-bucket endpoint bucket project region accessKeyID secretAccessKey
+secret_owned_label orders-bucket
 
 bucket="$(secret_value orders-bucket bucket)"
 endpoint="$(secret_value orders-bucket endpoint)"

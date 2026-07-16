@@ -583,6 +583,16 @@ the same namespace, with flat keys stable per driver. Direct
 `valueFrom.secretKeyRef` and `envFrom.secretRef` work without an
 init-container shim.
 
+Every minted Secret is labelled `buckety.yolean.se/owned: "true"`.
+The label is controller bookkeeping: the manager's Secret informer
+is scoped to it, so the controller's memory tracks buckety usage
+rather than the cluster's total Secret count. Consumers MUST NOT
+remove it (the Secret would fall out of the controller's watch
+until the next periodic reconcile re-stamps it), and the
+pre-existing-Secret safety check deliberately reads the apiserver
+directly so unlabelled foreign Secrets still surface
+`SecretConflict` instead of being adopted.
+
 **Secret key naming convention.** Each driver's emitted Secret
 includes a **resource-type key** holding the actual backend
 identity:

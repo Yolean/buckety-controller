@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +38,24 @@ type Reconciler struct {
 	// Recorder emits Events alongside failure conditions so
 	// `kubectl describe` tells the story; nil disables (tests).
 	Recorder record.EventRecorder
+	// Live reads straight from the apiserver, bypassing the
+	// manager cache. The cache only carries Secrets labelled
+	// LabelOwnedSecret, so Secret existence checks MUST use this
+	// reader: an unlabelled Secret (pre-existing foreign one, or
+	// one minted before the label existed) is invisible to the
+	// cache, and a cached lookup would wrongly report it absent.
+	// Wired from mgr.GetAPIReader(); nil falls back to the cached
+	// client (only acceptable in tests without cache scoping).
+	Live client.Reader
+}
+
+// liveReader returns the uncached reader, or the cached client
+// when tests have not wired one.
+func (r *Reconciler) liveReader() client.Reader {
+	if r.Live != nil {
+		return r.Live
+	}
+	return r.Client
 }
 
 // eventIfTransition emits an Event only when the condition's
@@ -209,13 +228,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Refuse to touch a Secret this BucketyAccess does not control:
-	// CreateOrUpdate would adopt an orphan Secret in place,
-	// clobbering its data and later garbage-collecting it with the
-	// access. This also covers a Secret still owned by a deleted
-	// predecessor access (GC lag): the conflict clears on a later
-	// requeue once the old Secret is gone.
+	// adopting an orphan Secret in place would clobber its data and
+	// later garbage-collect it with the access. This also covers a
+	// Secret still owned by a deleted predecessor access (GC lag):
+	// the conflict clears on a later requeue once the old Secret is
+	// gone. Live read, not cache: foreign Secrets carry no
+	// LabelOwnedSecret and are invisible to the scoped informer.
 	var existing corev1.Secret
-	getErr := r.Get(ctx, types.NamespacedName{Namespace: access.Namespace, Name: access.Spec.CredentialsSecretName}, &existing)
+	getErr := r.liveReader().Get(ctx, types.NamespacedName{Namespace: access.Namespace, Name: access.Spec.CredentialsSecretName}, &existing)
 	switch {
 	case getErr == nil && !metav1.IsControlledBy(&existing, &access):
 		msg := fmt.Sprintf("secret %q exists and is not managed by this BucketyAccess; delete it or pick another credentialsSecretName", access.Spec.CredentialsSecretName)
@@ -235,20 +255,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Mint/update the Secret with this BucketyAccess as owner.
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      access.Spec.CredentialsSecretName,
-			Namespace: access.Namespace,
-		},
-	}
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		if err := controllerutil.SetControllerReference(&access, secret, r.Scheme); err != nil {
-			return err
-		}
-		secret.Type = corev1.SecretTypeOpaque
-		secret.Data = res.SecretData
-		return nil
-	})
+	// Built on the live read above instead of
+	// controllerutil.CreateOrUpdate, whose cached read would miss
+	// an owned-but-unlabelled Secret (minted by an older version)
+	// and dead-end in AlreadyExists on the Create attempt. The
+	// update path stamps LabelOwnedSecret, which is what migrates
+	// pre-label Secrets into the scoped cache.
+	err = r.writeSecret(ctx, &access, &existing, apierrors.IsNotFound(getErr), res.SecretData)
 	if err != nil {
 		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
 			// The namespace is going away and will take this
@@ -290,6 +303,39 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.RequeueAfter(), nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// writeSecret creates or updates the access's credentials Secret
+// with owner-ref, LabelOwnedSecret and the driver's data. existing
+// is the live-read state (ignored when notFound); a no-op update
+// is skipped so steady-state requeues do not bump
+// resourceVersion.
+func (r *Reconciler) writeSecret(ctx context.Context, access *bucketyv1.BucketyAccess, existing *corev1.Secret, notFound bool, data map[string][]byte) error {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      access.Spec.CredentialsSecretName,
+			Namespace: access.Namespace,
+		},
+	}
+	if !notFound {
+		secret = existing.DeepCopy()
+	}
+	if err := controllerutil.SetControllerReference(access, secret, r.Scheme); err != nil {
+		return err
+	}
+	if secret.Labels == nil {
+		secret.Labels = map[string]string{}
+	}
+	secret.Labels[bucketyv1.LabelOwnedSecret] = "true"
+	secret.Type = corev1.SecretTypeOpaque
+	secret.Data = data
+	if notFound {
+		return r.Create(ctx, secret)
+	}
+	if equality.Semantic.DeepEqual(existing, secret) {
+		return nil
+	}
+	return r.Update(ctx, secret)
 }
 
 func isReady(bky *bucketyv1.Buckety) bool {

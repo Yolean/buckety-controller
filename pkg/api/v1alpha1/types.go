@@ -23,6 +23,19 @@ const (
 	// explicit BucketyAccess targets the same Buckety or when
 	// defaultAccess is removed.
 	LabelImplicit = "buckety.yolean.se/implicit"
+
+	// LabelOwnedSecret ("true") marks every Secret the controller
+	// mints. The manager cache is scoped to this label for
+	// v1.Secret, so the informer footprint tracks buckety usage
+	// instead of the cluster's total Secret count (a multi-site
+	// cluster OOMKilled the controller at default limits before
+	// this scoping). Consequence: any Secret without the label is
+	// invisible to the cached client, so reads that must see
+	// foreign Secrets (the SecretConflict safety check) go through
+	// the live API reader. Secrets minted by older versions gain
+	// the label on their next reconcile (periodic requeue at the
+	// latest), which also re-admits them to the cache.
+	LabelOwnedSecret = "buckety.yolean.se/owned"
 )
 
 // RetentionPolicy controls what happens to the backend resource

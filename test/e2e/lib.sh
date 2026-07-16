@@ -221,3 +221,15 @@ gcs_bucket_versioning_enabled() {
   }
   printf '%s' "$out" | tr -d '[:space:]' | grep -q '"versioning":{"enabled":true}'
 }
+
+# secret_owned_label <secret-name>
+# Every controller-minted Secret carries buckety.yolean.se/owned=true;
+# the manager cache is scoped to it (issue #10), so a missing label
+# means the Secret would silently fall out of the controller's view.
+secret_owned_label() {
+  local secret="$1"
+  local v
+  v="$(kc get "secret/$secret" -o jsonpath='{.metadata.labels.buckety\.yolean\.se/owned}')"
+  [[ "$v" == "true" ]] \
+    || fail "Secret/$secret missing buckety.yolean.se/owned=true label (got '$v')"
+}
