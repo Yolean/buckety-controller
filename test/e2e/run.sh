@@ -166,6 +166,31 @@ scenario_matches_impl() {
   esac
 }
 
+# The apiserver resolves the validating webhook through the
+# Service's Endpoints. Scenarios that rescale or restart the
+# controller (scaled-to-zero, misconfigured-startup,
+# backend-stickiness) end with `rollout status`, which proves pod
+# readiness but not Endpoints propagation - a short lag window in
+# which the NEXT scenario's apply fails with "no endpoints
+# available for service buckety-controller-webhook" (seen on run
+# 29493728100: kadm/secret-conflict + webhook-fallback-validation
+# failed at apply seconds after scaled-to-zero restored the
+# controller). Wait for an address before each scenario's apply.
+wait_webhook_endpoints() {
+  local deadline=$(( $(date +%s) + 60 ))
+  while (( $(date +%s) < deadline )); do
+    local ip
+    ip="$(kubectl -n "$CONTROLLER_NS" get endpoints buckety-controller-webhook       -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)"
+    [[ -n "$ip" ]] && return 0
+    sleep 2
+  done
+  # Soft warning: an apply that needs the webhook will fail loudly
+  # anyway, and scenarios that do not touch the webhook should not
+  # be blocked here.
+  log "webhook endpoints not ready after 60s; proceeding"
+  return 0
+}
+
 # run_scenario is invoked in an `if` condition, which makes bash
 # ignore `set -e` for everything inside the function body. Every
 # step therefore propagates failure explicitly with `|| return 1`;
@@ -179,6 +204,7 @@ run_scenario() {
   ns="$(echo "$ns" | tr 'A-Z_' 'a-z-' | head -c 60 | sed 's/-$//')"
 
   log "=== scenario: $scenario -> $ns (impl=$impl) ==="
+  wait_webhook_endpoints
   kubectl create namespace "$ns" || return 1
 
   # Render first: config-only scenarios (misconfigured-startup)
