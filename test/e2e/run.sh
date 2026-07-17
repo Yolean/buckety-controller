@@ -216,10 +216,29 @@ run_scenario() {
     return 1
   }
   if [[ -n "${rendered//[$'\n\r\t ']/}" ]]; then
-    printf '%s\n' "$rendered" | kubectl apply -n "$ns" -f - || {
+    # wait_webhook_endpoints above reads Endpoints fresh, but the
+    # apiserver resolves the webhook Service through an informer
+    # cache that can lag a beat after the controller pod churns -
+    # seen as "no endpoints available" on the first apply after
+    # scaled-to-zero (run 29602598294) despite the wait passing.
+    # The error is transient and apply is idempotent: retry it.
+    # Admission DENIALS say "denied the request", not "failed
+    # calling webhook", so real rejections still fail fast.
+    local applied=0 apply_out=""
+    for _ in $(seq 1 15); do
+      if apply_out="$(printf '%s\n' "$rendered" | kubectl apply -n "$ns" -f - 2>&1)"; then
+        applied=1
+        printf '%s\n' "$apply_out"
+        break
+      fi
+      grep -q "failed calling webhook" <<<"$apply_out" || break
+      sleep 2
+    done
+    if (( ! applied )); then
+      printf '%s\n' "$apply_out" >&2
       log "scenario FAILED (apply): $scenario; namespace $ns left standing"
       return 1
-    }
+    fi
   else
     log "scenario applies no namespaced resources (config-only)"
   fi
