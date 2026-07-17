@@ -125,6 +125,64 @@ kafka_topic_absent() {
   fail "Kafka topic '$topic' still present on $bootstrap"
 }
 
+# rollout_restart <deploy> [namespace]
+# kubectl refuses a second restart within the same second (the
+# restartedAt annotation has 1s granularity), which fast machines
+# hit when scenario loops re-trigger back to back; GHA runners
+# never did. Retry briefly instead of failing the scenario.
+rollout_restart() {
+  local deploy="$1" ns="${2:-$E2E_CONTROLLER_NS}"
+  local out=""
+  for _ in $(seq 1 5); do
+    if out="$(kcg -n "$ns" rollout restart "$deploy" 2>&1)"; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    grep -q "within the past second" <<<"$out" || break
+    sleep 1
+  done
+  printf '%s\n' "$out" >&2
+  fail "rollout restart $deploy failed"
+}
+
+# rpk_run <name-prefix> <rpk args...>
+# Runs an arbitrary rpk command via an ephemeral pod. stdin is
+# forwarded, so `printf msg | rpk_run produce topic produce ...`
+# feeds the producer. Caller checks the exit code.
+rpk_run() {
+  local prefix="$1"
+  shift
+  local kns="${E2E_KAFKA_NAMESPACE:-redpanda}"
+  kcg run -n "$kns" --rm -i --restart=Never --quiet \
+    --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
+    "rpk-${prefix}-$RANDOM" -- \
+    "$@" 2>&1
+}
+
+# kafka_topic_create <topic>
+kafka_topic_create() {
+  local topic="$1"
+  local bootstrap="${E2E_KAFKA_BOOTSTRAP:-redpanda.${E2E_KAFKA_NAMESPACE:-redpanda}.svc.cluster.local:9093}"
+  rpk_run create topic create "$topic" --brokers "$bootstrap" </dev/null \
+    || fail "could not create Kafka topic '$topic'"
+}
+
+# kafka_topic_produce <topic> <message>
+kafka_topic_produce() {
+  local topic="$1" msg="$2"
+  local bootstrap="${E2E_KAFKA_BOOTSTRAP:-redpanda.${E2E_KAFKA_NAMESPACE:-redpanda}.svc.cluster.local:9093}"
+  printf '%s\n' "$msg" | rpk_run produce topic produce "$topic" --brokers "$bootstrap" \
+    || fail "could not produce to Kafka topic '$topic'"
+}
+
+# kafka_topic_delete <topic>
+kafka_topic_delete() {
+  local topic="$1"
+  local bootstrap="${E2E_KAFKA_BOOTSTRAP:-redpanda.${E2E_KAFKA_NAMESPACE:-redpanda}.svc.cluster.local:9093}"
+  rpk_run delete topic delete "$topic" --brokers "$bootstrap" </dev/null \
+    || fail "could not delete Kafka topic '$topic'"
+}
+
 # s3_bucket_exists <bucket> <endpoint> <access> <secret>
 # Verifies the bucket exists via an ephemeral aws-cli pod.
 s3_bucket_exists() {
@@ -160,6 +218,31 @@ s3_api() {
 # Echoes True | False | Unknown | <empty> for the named condition.
 condition_status() {
   kc get "$1" -o "jsonpath={.status.conditions[?(@.type=='$2')].status}" 2>/dev/null
+}
+
+# wait_ready_reason <kind/name> <reason> [timeoutSeconds]
+# Waits until the Ready condition carries the given reason,
+# whatever its status. For asserting specific False states
+# (BackendResourceExists, ...) that kubectl wait cannot express.
+wait_ready_reason() {
+  local target="$1" reason="$2" timeout="${3:-60}"
+  log "waiting for $target Ready reason=$reason (timeout ${timeout}s)"
+  local deadline=$(( $(date +%s) + timeout )) got=""
+  while (( $(date +%s) < deadline )); do
+    got="$(kc get "$target" -o "jsonpath={.status.conditions[?(@.type=='Ready')].reason}" 2>/dev/null || true)"
+    [[ "$got" == "$reason" ]] && return 0
+    sleep 2
+  done
+  kc get "$target" -o yaml >&2
+  fail "$target Ready reason is '$got', wanted '$reason'"
+}
+
+# assert_provenance <buckety-name> <Created|Adopted>
+assert_provenance() {
+  local name="$1" want="$2" got
+  got="$(kc get "buckety/$name" -o jsonpath='{.status.provenance}')"
+  [[ "$got" == "$want" ]] \
+    || fail "buckety/$name provenance is '$got', wanted '$want'"
 }
 
 # wait_condition <kind/name> <conditionType> <expectedStatus> [timeout]
@@ -248,6 +331,33 @@ secret_owned_label() {
   v="$(kc get "secret/$secret" -o jsonpath='{.metadata.labels.buckety\.yolean\.se/owned}')"
   [[ "$v" == "true" ]] \
     || fail "Secret/$secret missing buckety.yolean.se/owned=true label (got '$v')"
+}
+
+# gcs_object_delete <bucket> <endpoint> <key>
+# Deletes one object directly (out-of-band). Slash-free keys only;
+# the JSON API wants slashes percent-encoded in the object path.
+gcs_object_delete() {
+  local bucket="$1" endpoint="$2" key="$3"
+  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+    --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
+    "curl-rmobj-$RANDOM" -- \
+    -sfS -o /dev/null -X DELETE \
+    "http://$endpoint/storage/v1/b/$bucket/o/$key" </dev/null \
+    || fail "could not delete GCS object '$bucket/$key'"
+}
+
+# gcs_bucket_create <bucket> <endpoint> [project]
+# Creates the bucket directly via the JSON API (out-of-band).
+gcs_bucket_create() {
+  local bucket="$1" endpoint="$2" project="${3:-e2e-project}"
+  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+    --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
+    "curl-mkbucket-$RANDOM" -- \
+    -sfS -o /dev/null -X POST \
+    -H "Content-Type: application/json" \
+    --data-raw "{\"name\": \"$bucket\"}" \
+    "http://$endpoint/storage/v1/b?project=$project" </dev/null \
+    || fail "could not create GCS bucket '$bucket'"
 }
 
 # gcs_object_put <bucket> <endpoint> <key> <content>

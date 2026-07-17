@@ -2,6 +2,7 @@
 /bin/
 /dist/
 /oci/
+/oci-dv-*/
 /target/
 
 # Test artefacts
