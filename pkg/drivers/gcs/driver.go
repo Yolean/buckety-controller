@@ -157,6 +157,37 @@ func (d *Driver) Version() string { return version }
 // Location cannot be changed in place; a location parameter that
 // disagrees with the backend surfaces ErrParameterDrift and waits
 // for human resolution.
+// InspectBuckety probes existence and content ahead of the
+// adoption decision (SPEC §Adoption). Emptiness counts live
+// objects only, consistent with recursive deletion's notion of
+// remaining content; noncurrent generations and soft-deleted
+// objects do not block adoption. Without storage.objects.list
+// the check degrades to non-empty: unknown content is content.
+func (d *Driver) InspectBuckety(ctx context.Context, name string) (registry.Inspection, error) {
+	bkt := d.client.Bucket(name)
+	_, err := bkt.Attrs(ctx)
+	switch {
+	case errors.Is(err, storage.ErrBucketNotExist):
+		return registry.Inspection{}, nil
+	case isForbidden(err):
+		return registry.Inspection{}, fmt.Errorf("gcs: bucket %q is not accessible with this backend's credentials (name likely taken by another project): %w", name, err)
+	case err != nil:
+		return registry.Inspection{}, fmt.Errorf("gcs: get bucket %q: %w", name, err)
+	}
+	it := bkt.Objects(ctx, &storage.Query{})
+	_, err = it.Next()
+	switch {
+	case errors.Is(err, iterator.Done):
+		return registry.Inspection{Exists: true, Empty: true}, nil
+	case err == nil:
+		return registry.Inspection{Exists: true, Empty: false}, nil
+	case isForbidden(err):
+		return registry.Inspection{Exists: true, Empty: false}, nil
+	default:
+		return registry.Inspection{}, fmt.Errorf("gcs: list bucket %q: %w", name, err)
+	}
+}
+
 func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) error {
 	bkt := d.client.Bucket(req.Name)
 	attrs, err := bkt.Attrs(ctx)

@@ -48,6 +48,34 @@ const (
 	RetentionDelete RetentionPolicy = "Delete"
 )
 
+// AdoptionPolicy controls whether a Buckety may claim a backend
+// resource that already exists at first reconcile. See SPEC.md
+// section "Adoption".
+// +kubebuilder:validation:Enum=AdoptEmpty;Adopt
+type AdoptionPolicy string
+
+const (
+	// AdoptionAdoptEmpty (the default) adopts a pre-existing
+	// resource only when it holds no live content; a non-empty
+	// resource surfaces Ready=False/BackendResourceExists instead
+	// of being silently claimed.
+	AdoptionAdoptEmpty AdoptionPolicy = "AdoptEmpty"
+	// AdoptionAdopt claims a pre-existing resource even when it
+	// holds content.
+	AdoptionAdopt AdoptionPolicy = "Adopt"
+)
+
+// Provenance records whether the controller created the backend
+// resource or claimed a pre-existing one. Sticky from first
+// reconcile. DeleteBuckety only ever runs for ProvenanceCreated;
+// adopted resources are always retained (SPEC.md "Adoption").
+type Provenance string
+
+const (
+	ProvenanceCreated Provenance = "Created"
+	ProvenanceAdopted Provenance = "Adopted"
+)
+
 // Role is advisory in v1alpha1: drivers do not yet scope
 // credentials per role. Drivers surface a ScopingNotImplemented
 // condition rather than silently treating Reader as ReadWrite.
@@ -92,6 +120,16 @@ type BucketySpec struct {
 	// +kubebuilder:default=Retain
 	RetentionPolicy RetentionPolicy `json:"retentionPolicy,omitempty"`
 
+	// Adoption controls what happens when the resolved backend
+	// resource already exists at first reconcile. AdoptEmpty (the
+	// default) adopts only content-free resources; Adopt claims a
+	// resource with pre-existing content. Adopted resources are
+	// never deleted from the backend, whatever retentionPolicy
+	// says. Mutable so a gate-blocked Buckety can be unblocked in
+	// place. See SPEC.md section "Adoption".
+	// +kubebuilder:default=AdoptEmpty
+	Adoption AdoptionPolicy `json:"adoption,omitempty"`
+
 	// DefaultAccess materialises an implicit BucketyAccess. See
 	// SPEC.md §Implicit access for the lifecycle and the
 	// migration corner cases.
@@ -127,6 +165,14 @@ type BucketyStatus struct {
 
 	// BackendResourceName is the resolved name template. Sticky.
 	BackendResourceName string `json:"backendResourceName,omitempty"`
+
+	// Provenance is Created when the controller made the backend
+	// resource and Adopted when it claimed a pre-existing one
+	// (empty resources adopt by default, non-empty ones need
+	// spec.adoption=Adopt). Sticky. Empty on resources stamped by
+	// controllers predating adoption tracking; those keep the old
+	// deletion behavior.
+	Provenance Provenance `json:"provenance,omitempty"`
 
 	// Conditions follow the standard meta/v1 shape. Required
 	// conditions per SPEC.md §Open implementation choices:

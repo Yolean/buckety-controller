@@ -77,6 +77,18 @@ spec:
                   Buckety is deleted.
                 enum: [Retain, Delete]
                 default: Retain
+              adoption:
+                type: string
+                description: |
+                  What happens when the resolved backend resource
+                  already exists at first reconcile. AdoptEmpty (the
+                  default) adopts only content-free resources; Adopt
+                  claims a resource with pre-existing content.
+                  Adopted resources are never deleted from the
+                  backend, whatever retentionPolicy says. See SPEC.md
+                  section "Adoption".
+                enum: [AdoptEmpty, Adopt]
+                default: AdoptEmpty
               defaultAccess:
                 type: object
                 description: |
@@ -119,6 +131,15 @@ spec:
                 type: string
                 description: |
                   Resolved name template. Sticky from first reconcile.
+              provenance:
+                type: string
+                description: |
+                  Created when the controller made the backend
+                  resource, Adopted when it claimed a pre-existing
+                  one. Sticky. Absent on resources stamped before
+                  adoption tracking existed. DeleteBuckety only runs
+                  for Created; see SPEC.md section "Adoption".
+                enum: [Created, Adopted]
               conditions:
                 type: array
                 items:

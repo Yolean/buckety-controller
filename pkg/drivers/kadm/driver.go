@@ -77,6 +77,42 @@ func (d *Driver) Bootstrap() string {
 
 // EnsureBuckety create-or-updates the topic to match req.
 // Idempotent. Partition shrink is rejected with ErrParameterDrift.
+// InspectBuckety probes existence and content ahead of the
+// adoption decision (SPEC §Adoption). A topic is empty when no
+// partition retains records (start offset == end offset); fully
+// expired records count as none, matching what a consumer could
+// actually read.
+func (d *Driver) InspectBuckety(ctx context.Context, name string) (registry.Inspection, error) {
+	existing, err := d.describeTopic(ctx, name)
+	if err != nil {
+		return registry.Inspection{}, err
+	}
+	if existing == nil {
+		return registry.Inspection{}, nil
+	}
+	starts, err := d.aclient.ListStartOffsets(ctx, name)
+	if err == nil {
+		err = starts.Error()
+	}
+	if err != nil {
+		return registry.Inspection{}, fmt.Errorf("kadm: list start offsets %q: %w", name, err)
+	}
+	ends, err := d.aclient.ListEndOffsets(ctx, name)
+	if err == nil {
+		err = ends.Error()
+	}
+	if err != nil {
+		return registry.Inspection{}, fmt.Errorf("kadm: list end offsets %q: %w", name, err)
+	}
+	empty := true
+	ends.Each(func(end kadm.ListedOffset) {
+		if start, ok := starts.Lookup(end.Topic, end.Partition); !ok || end.Offset > start.Offset {
+			empty = false
+		}
+	})
+	return registry.Inspection{Exists: true, Empty: empty}, nil
+}
+
 func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) error {
 	wantParts, wantRF, wantCfgs, err := translateParameters(req.Parameters)
 	if err != nil {

@@ -114,6 +114,46 @@ type Driver struct {
 func (d *Driver) Name() string    { return DriverName }
 func (d *Driver) Version() string { return version }
 
+// InspectBuckety probes existence and content ahead of the
+// adoption decision (SPEC §Adoption). Emptiness counts current
+// objects and noncurrent object versions; delete markers alone do
+// not count as content. A backend without versioning support
+// (NotImplemented on the versions listing) has no hidden versions
+// to find, so the current-objects check decides. AccessDenied on
+// either listing degrades to non-empty: unknown content is
+// content.
+func (d *Driver) InspectBuckety(ctx context.Context, name string) (registry.Inspection, error) {
+	if _, err := d.client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(name)}); err != nil {
+		if isNotFound(err) {
+			return registry.Inspection{}, nil
+		}
+		return registry.Inspection{}, fmt.Errorf("s3: bucket %q exists but is not accessible with this backend's credentials (name likely taken by another account): %w", name, err)
+	}
+	objs, err := d.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
+		Bucket: aws.String(name), MaxKeys: aws.Int32(1),
+	})
+	switch {
+	case isAccessDenied(err):
+		return registry.Inspection{Exists: true, Empty: false}, nil
+	case err != nil:
+		return registry.Inspection{}, fmt.Errorf("s3: list bucket %q: %w", name, err)
+	case len(objs.Contents) > 0:
+		return registry.Inspection{Exists: true, Empty: false}, nil
+	}
+	vers, err := d.client.ListObjectVersions(ctx, &awss3.ListObjectVersionsInput{
+		Bucket: aws.String(name), MaxKeys: aws.Int32(1),
+	})
+	switch {
+	case isNotImplemented(err):
+		return registry.Inspection{Exists: true, Empty: true}, nil
+	case isAccessDenied(err):
+		return registry.Inspection{Exists: true, Empty: false}, nil
+	case err != nil:
+		return registry.Inspection{}, fmt.Errorf("s3: list versions of %q: %w", name, err)
+	}
+	return registry.Inspection{Exists: true, Empty: len(vers.Versions) == 0}, nil
+}
+
 // EnsureBuckety creates the backend bucket. Idempotent on
 // BucketAlreadyOwnedByYou. BucketAlreadyExists is ambiguous: most
 // non-AWS implementations surface it for a caller-owned bucket,
@@ -420,6 +460,14 @@ func isAlreadyExists(err error) bool {
 func isBucketNotEmpty(err error) bool {
 	var api smithy.APIError
 	return errors.As(err, &api) && api.ErrorCode() == "BucketNotEmpty"
+}
+
+// isAccessDenied reports a permission refusal on an operation the
+// caller treats as optional (InspectBuckety's emptiness listings
+// degrade to non-empty rather than failing the reconcile).
+func isAccessDenied(err error) bool {
+	var api smithy.APIError
+	return errors.As(err, &api) && api.ErrorCode() == "AccessDenied"
 }
 
 // isNotFound reports whether err is the S3 service signalling a

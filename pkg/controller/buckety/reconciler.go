@@ -145,12 +145,51 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err := backend.Driver.ValidateResourceName(resolved); err != nil {
 			return r.surfaceCondition(ctx, &bky, baseBky, "Ready", metav1.ConditionFalse, "NameInvalid", err.Error())
 		}
+		// Adoption gate (SPEC §Adoption): before claiming the name,
+		// find out whether the backend resource already exists and
+		// whether it holds content. The decision freezes into
+		// status.provenance together with the other sticky fields;
+		// a refused adoption stamps nothing, so the gate re-runs
+		// until the spec or the backend changes.
+		inspection, err := backend.Driver.InspectBuckety(ctx, resolved)
+		if err != nil {
+			r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed",
+				corev1.EventTypeWarning, "InspectFailed", err.Error())
+			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", err.Error(), bky.Generation)
+			_ = r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
+			return ctrl.Result{}, err
+		}
+		provenance := decideProvenance(inspection, bky.Spec.Adoption)
+		if provenance == "" {
+			msg := fmt.Sprintf(
+				"backend resource %q already exists on backend %q and holds content; refusing to adopt it. Set spec.adoption=Adopt to claim it (adopted resources are never deleted from the backend), or change spec.name.",
+				resolved, backend.Name)
+			r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendResourceExists",
+				corev1.EventTypeWarning, "BackendResourceExists", msg)
+			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendResourceExists", msg, bky.Generation)
+			setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "BackendResourceExists", "adoption refused", bky.Generation)
+			if err := r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky)); err != nil {
+				return ctrl.Result{}, err
+			}
+			// Spec edits re-enqueue via the watch; the periodic
+			// cadence catches the backend resource being emptied
+			// or removed out-of-band.
+			if r.RequeueAfter != nil {
+				return r.RequeueAfter(), nil
+			}
+			return ctrl.Result{}, nil
+		}
+		if provenance == bucketyv1.ProvenanceAdopted && r.Recorder != nil {
+			r.Recorder.Event(&bky, corev1.EventTypeNormal, "Adopted",
+				fmt.Sprintf("adopted pre-existing backend resource %q (empty=%v); it will be retained when this Buckety is deleted", resolved, inspection.Empty))
+		}
 		major, _ := majorOf(backend.Driver.Version())
 		bky.Status.Backend = backend.Name
 		bky.Status.Driver = backend.Driver.Name()
 		bky.Status.DriverMajor = major
 		bky.Status.DriverBuildVersion = backend.Driver.Version()
 		bky.Status.BackendResourceName = resolved
+		bky.Status.Provenance = provenance
 		// Update, not Patch: driverMajor stamped as 0 (any 0.x
 		// driver) is invisible to a merge diff against the
 		// zero-valued base, so a patch would never persist it.
@@ -280,6 +319,20 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 			return r.RequeueAfter(), nil
 		}
 		return ctrl.Result{}, nil
+	}
+
+	// Adopted resources are never deleted from the backend (SPEC
+	// §Adoption): the content predates this CR, or the CR never
+	// verified otherwise, so retentionPolicy=Delete degrades to
+	// Retain. Resources stamped before provenance tracking carry
+	// no value and keep the old behavior.
+	if bky.Spec.RetentionPolicy == bucketyv1.RetentionDelete && bky.Status.Provenance == bucketyv1.ProvenanceAdopted {
+		if r.Recorder != nil {
+			r.Recorder.Event(bky, corev1.EventTypeNormal, "RetainedOnDelete",
+				fmt.Sprintf("backend resource %q was adopted, not created; retained despite retentionPolicy=Delete", bky.Status.BackendResourceName))
+		}
+		controllerutil.RemoveFinalizer(bky, bucketyv1.FinalizerCleanup)
+		return ctrl.Result{}, r.Update(ctx, bky)
 	}
 
 	// retentionPolicy=Delete blocks on DeleteBuckety succeeding
@@ -422,6 +475,21 @@ func (r *Reconciler) surfaceCondition(ctx context.Context, bky, base *bucketyv1.
 		corev1.EventTypeWarning, reason, message)
 	setCond(&bky.Status.Conditions, condType, status, reason, message, bky.Generation)
 	return ctrl.Result{}, r.Status().Patch(ctx, bky, client.MergeFrom(base))
+}
+
+// decideProvenance is the adoption gate's pure core (SPEC
+// §Adoption): the provenance to freeze at first reconcile, or ""
+// when adoption must be refused (exists with content and no
+// explicit opt-in).
+func decideProvenance(insp registry.Inspection, policy bucketyv1.AdoptionPolicy) bucketyv1.Provenance {
+	switch {
+	case !insp.Exists:
+		return bucketyv1.ProvenanceCreated
+	case insp.Empty, policy == bucketyv1.AdoptionAdopt:
+		return bucketyv1.ProvenanceAdopted
+	default:
+		return ""
+	}
 }
 
 // resolveName runs the name template against the Buckety + backend.
