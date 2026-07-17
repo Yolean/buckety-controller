@@ -1,0 +1,12 @@
+# Collides with the pre-created, content-holding resource; the
+# default adoption policy (AdoptEmpty) must refuse it.
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: adopt-pre
+spec:
+  backend: gcs
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: adopt-pre-creds
