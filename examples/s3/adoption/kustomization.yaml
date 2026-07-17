@@ -1,0 +1,5 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# CRs are applied in stages by assert.sh: the backend resources
+# they collide with must be pre-created out-of-band first.
+resources: []

@@ -27,6 +27,18 @@ type Driver interface {
 	// status.driverBuildVersion on every compatible reconcile.
 	Version() string
 
+	// InspectBuckety probes the backend resource without mutating
+	// or claiming it: does it exist, and does it hold content?
+	// Called once per Buckety at first reconcile, before
+	// EnsureBuckety, to decide adoption (SPEC §Adoption). Empty
+	// means no live content: no current objects for buckets
+	// (noncurrent versions and delete markers are not consulted),
+	// no retained records for topics. A backend that cannot verify
+	// emptiness (e.g. a provisioning credential without list
+	// permission) reports Empty=false - unknown content is treated
+	// as content.
+	InspectBuckety(ctx context.Context, name string) (Inspection, error)
+
 	// EnsureBuckety creates or updates the backend resource to
 	// match req. Idempotent. Drift the driver can't reconcile in
 	// place (e.g. Kafka partition shrink) surfaces as
@@ -84,6 +96,15 @@ type Driver interface {
 	// invalid backend name is rejected at admission; the reconciler
 	// re-checks before stamping for webhook-disabled deployments.
 	ValidateResourceName(name string) error
+}
+
+// Inspection is InspectBuckety's report.
+type Inspection struct {
+	// Exists is whether the backend resource is present.
+	Exists bool
+	// Empty is whether it holds no live content. Meaningful only
+	// when Exists; false when emptiness cannot be verified.
+	Empty bool
 }
 
 // EnsureRequest carries the resolved spec the controller has

@@ -208,6 +208,11 @@ spec:
   # What happens when this Buckety is deleted. Default: Retain.
   retentionPolicy: Retain     # Retain | Delete
 
+  # What happens when the resolved backend resource already exists
+  # at first reconcile. Default: AdoptEmpty (adopt only when the
+  # resource holds no content). See "Adoption".
+  adoption: AdoptEmpty        # AdoptEmpty | Adopt
+
   # Optional. Single-consumer shortcut. The controller materialises
   # an implicit BucketyAccess of the same name in the same
   # namespace. See "Implicit access" below for lifecycle and
@@ -223,6 +228,7 @@ status:
   driverMajor: 0                    # sticky: gates compatibility; see Driver versioning
   driverBuildVersion: "0.1.0"       # informational: full SemVer of the binary that last reconciled
   backendResourceName: tenant1.orders.v003  # sticky: resolved name template
+  provenance: Created               # sticky: Created | Adopted; see Adoption
   observedGeneration: 3
 ```
 
@@ -748,6 +754,68 @@ GCS HMAC secret is only retrievable at creation, so per-access
 minting cannot be idempotent until grant-once semantics exist.
 Key names stay the same when scoped credentials land.
 
+## Adoption
+
+A resolved backend resource name can collide with a resource that
+already exists: the default name is bare `metadata.name` (no
+namespace), a Retain-deleted Buckety leaves its resource behind
+for a recreate to find, and custom `spec.name` templates can
+resolve onto anything. Before this section existed the drivers
+treated "exists and reachable with our credentials" as "ours",
+which silently adopted foreign data - and a subsequent
+`retentionPolicy=Delete` recursive delete would destroy content
+that predates the CR. Reachability proves nothing about intent,
+so intent is tracked explicitly:
+
+**Provenance.** At first reconcile, before `EnsureBuckety` runs,
+the controller probes the backend via the driver's
+`InspectBuckety` (exists? holds content?) and freezes the answer
+into `status.provenance` together with the other sticky fields:
+
+- `Created` - the resource did not exist; the controller made it.
+- `Adopted` - the resource pre-existed and the controller claimed
+  it.
+
+Resources stamped by controllers predating provenance carry no
+value and keep the old behavior end to end.
+
+**The gate.** `spec.adoption` controls what first reconcile does
+when the resource already exists:
+
+- `AdoptEmpty` (default): adopt only when the resource holds no
+  live content (no current objects for buckets; noncurrent
+  versions and delete markers are not consulted. No retained
+  records for topics; fully expired records count as none).
+  A non-empty resource surfaces `Ready=False` with reason
+  `BackendResourceExists`, mints no Secret, stamps nothing, and
+  re-checks on the periodic cadence. The message names the
+  resource and the opt-in.
+- `Adopt`: claim the resource even when it holds content. An
+  `Adopted` event records the takeover.
+
+A backend that cannot verify emptiness (a provisioning credential
+without list permission) reports non-empty: unknown content is
+treated as content, and the operator sees the gate instead of a
+silent adoption.
+
+**Deletion never destroys adopted content.** `DeleteBuckety` runs
+only for `provenance=Created`. On an adopted resource,
+`retentionPolicy=Delete` degrades to Retain: the CR and its
+Secrets go, the backend resource stays, and a `RetainedOnDelete`
+event says why. This holds even for explicit `Adopt` - the
+controller declines to be the tool that destroys data it did not
+provision; content an operator truly wants gone is deleted
+out-of-band with data-plane credentials. (An explicit override
+may be added if a real need appears; none is known.)
+
+Two accepted races, both narrow and both failing toward safety
+or a trivially harmless mislabel: a resource created by a third
+party between the inspect and the create call is adopted by the
+create-conflict path but labelled `Created`; a controller crash
+between the backend create and the status write re-runs the gate
+and labels the (still empty) resource `Adopted`, which only makes
+deletion more conservative.
+
 ## Lifecycle and deletion
 
 - Both kinds carry a finalizer `buckety.yolean.se/cleanup`.
@@ -757,7 +825,9 @@ Key names stay the same when scoped credentials land.
   `BucketyAccess` being gone — controller does NOT cascade-delete
   them; it surfaces a `BlockedByAccesses` condition with the
   offending names — and (b) `DeleteBuckety` succeeding if
-  `retentionPolicy == Delete`.
+  `retentionPolicy == Delete` and `status.provenance` is
+  `Created` (adopted resources are always retained, see
+  *Adoption*).
 
 ### `Delete` is recursive
 
@@ -844,6 +914,15 @@ parity* below):
     field. The pod restart loop is the operator's user-visible
     symptom — this e2e proves the log message is enough to
     diagnose.
+11. **Adoption.** Pre-create a backend resource with content
+    out-of-band; a Buckety resolving to that name surfaces
+    `Ready=False/BackendResourceExists` and mints no Secret.
+    `spec.adoption=Adopt` unblocks it with
+    `status.provenance=Adopted`; deleting that Buckety with
+    `retentionPolicy=Delete` retains the resource and its
+    content. A pre-existing EMPTY resource adopts under the
+    default policy; a fresh name gets `provenance=Created` and
+    still deletes normally. See *Adoption*.
 
 ## E2E harness and parity
 

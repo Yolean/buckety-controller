@@ -1,0 +1,12 @@
+# Collides with the pre-created EMPTY resource; AdoptEmpty (the
+# default) adopts it silently.
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: adopt-void
+spec:
+  backend: s3
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: adopt-void-creds

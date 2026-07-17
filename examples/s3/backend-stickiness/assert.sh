@@ -14,7 +14,7 @@ apply_config() {
   kcg -n "$E2E_CONTROLLER_NS" create secret generic buckety-controller-config \
     --from-file=buckety-controller.yaml="$1" \
     --dry-run=client -o yaml | kcg apply -f -
-  kcg -n "$E2E_CONTROLLER_NS" rollout restart deploy/buckety-controller
+  rollout_restart deploy/buckety-controller
   kcg -n "$E2E_CONTROLLER_NS" rollout status  deploy/buckety-controller --timeout=60s
 }
 

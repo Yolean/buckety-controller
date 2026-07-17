@@ -19,7 +19,7 @@ restore() {
   kcg -n "$E2E_CONTROLLER_NS" create secret generic buckety-controller-config \
     --from-file=buckety-controller.yaml="$E2E_ORIGINAL_CONFIG" \
     --dry-run=client -o yaml | kcg apply -f -
-  kcg -n "$E2E_CONTROLLER_NS" rollout restart deploy/buckety-controller
+  rollout_restart deploy/buckety-controller
   kcg -n "$E2E_CONTROLLER_NS" rollout status  deploy/buckety-controller --timeout=60s
 }
 trap restore EXIT
@@ -28,7 +28,7 @@ log "swapping controller config: kafka -> kafka-renamed"
 kcg -n "$E2E_CONTROLLER_NS" create secret generic buckety-controller-config \
   --from-file=buckety-controller.yaml="$E2E_RENAMED_CONFIG" \
   --dry-run=client -o yaml | kcg apply -f -
-kcg -n "$E2E_CONTROLLER_NS" rollout restart deploy/buckety-controller
+rollout_restart deploy/buckety-controller
 kcg -n "$E2E_CONTROLLER_NS" rollout status  deploy/buckety-controller --timeout=60s
 
 wait_condition buckety/sticky-orig BackendUnavailable True 90s
