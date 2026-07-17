@@ -34,10 +34,7 @@ kc patch buckety/adopt-pre --type=merge -p '{"spec":{"adoption":"Adopt"}}'
 wait_ready buckety/adopt-pre 120s
 assert_provenance adopt-pre Adopted
 secret_has_keys adopt-pre-creds endpoint bucket project region accessKeyID secretAccessKey
-out="$(gcs_api "http://$endpoint/storage/v1/b/adopt-pre/o")" \
-  || fail "listing adopt-pre failed: $out"
-grep -qF precious.txt <<<"$out" \
-  || fail "pre-existing object gone after adoption: $out"
+gcs_object_exists adopt-pre "$endpoint" precious.txt
 
 # Deleting an adopted Buckety retains the backend resource and its
 # content even with retentionPolicy=Delete.
@@ -45,10 +42,7 @@ log "deleting adopted Bucketys (retentionPolicy=Delete must degrade to Retain)"
 kc delete buckety/adopt-pre --wait=true --timeout=90s
 resource_absent secret/adopt-pre-creds 30s
 gcs_bucket_exists adopt-pre "$endpoint"
-out="$(gcs_api "http://$endpoint/storage/v1/b/adopt-pre/o")" \
-  || fail "listing adopt-pre failed: $out"
-grep -qF precious.txt <<<"$out" \
-  || fail "adopted content destroyed by Buckety deletion: $out"
+gcs_object_exists adopt-pre "$endpoint" precious.txt
 kc delete buckety/adopt-void --wait=true --timeout=90s
 gcs_bucket_exists adopt-void "$endpoint"
 

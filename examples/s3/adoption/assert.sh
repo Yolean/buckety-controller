@@ -40,10 +40,7 @@ kc patch buckety/adopt-pre --type=merge -p '{"spec":{"adoption":"Adopt"}}'
 wait_ready buckety/adopt-pre 120s
 assert_provenance adopt-pre Adopted
 secret_has_keys adopt-pre-creds endpoint bucket accessKeyID secretAccessKey
-out="$(s3_api "$endpoint" "$access" "$secret" list-objects-v2 --bucket adopt-pre)" \
-  || fail "listing adopt-pre failed: $out"
-grep -qF precious.txt <<<"$out" \
-  || fail "pre-existing object gone after adoption: $out"
+s3_object_exists adopt-pre precious.txt "$endpoint" "$access" "$secret"
 
 # Deleting an adopted Buckety retains the backend resource and its
 # content even with retentionPolicy=Delete.
@@ -51,10 +48,7 @@ log "deleting adopted Bucketys (retentionPolicy=Delete must degrade to Retain)"
 kc delete buckety/adopt-pre --wait=true --timeout=90s
 resource_absent secret/adopt-pre-creds 30s
 s3_bucket_exists adopt-pre "$endpoint" "$access" "$secret"
-out="$(s3_api "$endpoint" "$access" "$secret" list-objects-v2 --bucket adopt-pre)" \
-  || fail "listing adopt-pre failed: $out"
-grep -qF precious.txt <<<"$out" \
-  || fail "adopted content destroyed by Buckety deletion: $out"
+s3_object_exists adopt-pre precious.txt "$endpoint" "$access" "$secret"
 kc delete buckety/adopt-void --wait=true --timeout=90s
 s3_bucket_exists adopt-void "$endpoint" "$access" "$secret"
 

@@ -214,6 +214,20 @@ s3_api() {
     s3api "$@" --endpoint-url "$endpoint" </dev/null 2>&1
 }
 
+# s3_object_exists <bucket> <key> <endpoint> <access> <secret>
+# Exit-code-only presence check via head-object. Do NOT assert
+# object presence by parsing list output: `kubectl run -i` can
+# miss a fast pod's stdout entirely (attach race) while the exit
+# code, taken from pod status, stays reliable - seen as an empty
+# list-objects-v2 capture failing the adoption scenario on a
+# bucket that provably held the object.
+s3_object_exists() {
+  local bucket="$1" key="$2" endpoint="$3" access="$4" secret="$5"
+  log "verifying S3 object '$bucket/$key' at $endpoint"
+  s3_api "$endpoint" "$access" "$secret" head-object --bucket "$bucket" --key "$key" >/dev/null \
+    || fail "S3 object '$bucket/$key' not found at $endpoint"
+}
+
 # condition_status <kind/name> <conditionType>
 # Echoes True | False | Unknown | <empty> for the named condition.
 condition_status() {
@@ -331,6 +345,17 @@ secret_owned_label() {
   v="$(kc get "secret/$secret" -o jsonpath='{.metadata.labels.buckety\.yolean\.se/owned}')"
   [[ "$v" == "true" ]] \
     || fail "Secret/$secret missing buckety.yolean.se/owned=true label (got '$v')"
+}
+
+# gcs_object_exists <bucket> <endpoint> <key>
+# Exit-code-only presence check via the object metadata GET (curl
+# -f exits non-zero on 404). Same attach-race rationale as
+# s3_object_exists. Slash-free keys only.
+gcs_object_exists() {
+  local bucket="$1" endpoint="$2" key="$3"
+  log "verifying GCS object '$bucket/$key' at $endpoint"
+  gcs_api "http://$endpoint/storage/v1/b/$bucket/o/$key" >/dev/null \
+    || fail "GCS object '$bucket/$key' not found at $endpoint"
 }
 
 # gcs_object_delete <bucket> <endpoint> <key>
