@@ -1,0 +1,46 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: buckety-webhook-certgen
+  namespace: buckety
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [get, create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: buckety-webhook-certgen
+  namespace: buckety
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: buckety-webhook-certgen
+subjects:
+- kind: ServiceAccount
+  name: buckety-webhook-certgen
+  namespace: buckety
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: buckety-webhook-certgen
+rules:
+- apiGroups: [admissionregistration.k8s.io]
+  resources: [validatingwebhookconfigurations]
+  resourceNames: [buckety-controller]
+  verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: buckety-webhook-certgen
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: buckety-webhook-certgen
+subjects:
+- kind: ServiceAccount
+  name: buckety-webhook-certgen
+  namespace: buckety

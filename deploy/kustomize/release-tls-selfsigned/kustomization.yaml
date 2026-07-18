@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The release base plus self-signed webhook TLS for clusters
+# without cert-manager, so the admission webhook stays ENABLED
+# everywhere. Running with --enable-webhook=false is strongly
+# discouraged: parameter, immutability, naming and adoption
+# errors then surface as Ready=False conditions instead of
+# failing the apply. See ../webhook-certgen/README.md.
+# The webhook convention hardcodes the buckety namespace (VWC
+# clientConfig, cert-manager annotation, certgen Job args), so
+# this composition sets it too and is applyable standalone.
+# Create the namespace first: kubectl create namespace buckety
+namespace: buckety
+resources:
+- ../release
+- ../webhook-certgen
