@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "object-store family Buckety parameters",
+  "description": "Schema for Buckety.spec.parameters restricted to the object-store family's common parameters (SPEC.md section \"Driver families\"). A resource that validates here is portable across every bucket backend (gcs, s3): driver-specific knobs (gcs location, uniformBucketLevelAccess, softDeleteRetentionSeconds; r2 jurisdiction) belong in the backend config entry's parameters defaults, not in the CR.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "versioning": {
+      "type": "string",
+      "enum": ["true", "false"],
+      "description": "Object versioning. Mutable; reconciled in place by every driver in the family. A backend that does not implement versioning is skipped fail-safe: the bucket still provisions."
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Object lifecycle rules as a JSON document in the same shape `gsutil lifecycle set` takes, restricted to the family's PORTABLE SUBSET: action Delete or AbortIncompleteMultipartUpload, condition age (required) plus at most one matchesPrefix. Example: {\"rule\": [{\"action\": {\"type\": \"Delete\"}, \"condition\": {\"age\": 7, \"matchesPrefix\": [\"board-prints/\"]}}]}. {\"rule\": []} clears all rules; omitting the parameter leaves rules unmanaged. A backend that cannot express lifecycle configuration is skipped fail-safe."
+    }
+  }
+}

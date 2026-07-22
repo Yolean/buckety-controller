@@ -37,6 +37,12 @@ jobs:
         go vet ./...
         go test ./...
 
+    - name: Assert generated CR schemas are committed
+      run: |
+        set -euxo pipefail
+        go run ./scripts/gen-cr-schemas
+        git diff --exit-code -- schema/
+
     - name: Install k3d, kubectl, crane, yq
       run: |
         set -euxo pipefail

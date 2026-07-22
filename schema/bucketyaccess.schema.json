@@ -1,0 +1,149 @@
+{
+  "$id": "https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/bucketyaccess.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Standalone editor schema for a BucketyAccess. Driver-specific spec.parameters validation happens at admission; this schema leaves it unconstrained.",
+  "properties": {
+    "apiVersion": {
+      "enum": [
+        "buckety.yolean.se/v1alpha1"
+      ],
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "BucketyAccess"
+      ],
+      "type": "string"
+    },
+    "metadata": {
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "spec": {
+      "properties": {
+        "bucketyRef": {
+          "description": "Reference to a Buckety in the same namespace.\nCross-namespace references are not supported in\nv1alpha1.\n",
+          "properties": {
+            "name": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "credentialsSecretName": {
+          "description": "Name of the Secret to mint in this namespace.\nImmutable.\n",
+          "minLength": 1,
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "role": {
+          "default": "ReadWrite",
+          "description": "In v1alpha1 all roles receive identical credentials\n(no per-consumer scoping). Drivers surface a\nScopingNotImplemented condition rather than silently\ntreating Reader as ReadWrite.\n",
+          "enum": [
+            "Reader",
+            "Writer",
+            "ReadWrite"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "bucketyRef",
+        "credentialsSecretName"
+      ],
+      "type": "object"
+    },
+    "status": {
+      "properties": {
+        "conditions": {
+          "items": {
+            "properties": {
+              "lastTransitionTime": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "observedGeneration": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "True",
+                  "False",
+                  "Unknown"
+                ],
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "status",
+              "lastTransitionTime",
+              "reason",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "observedGeneration": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "principal": {
+          "description": "Backend-side identity granted access. In v1alpha1\nwith no per-consumer scoping this is typically\nthe backend's root principal.\n",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "BucketyAccess",
+  "type": "object"
+}
