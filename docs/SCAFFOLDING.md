@@ -83,11 +83,16 @@ must create a `Certificate` named `buckety-controller-webhook`
 in the controller namespace with secretName
 `buckety-controller-webhook-tls`.
 
-Platforms without cert-manager (ystack at the time of this
-writing is one) drop `webhook.yaml` from the overlay AND pass
-`--enable-webhook=false` to the controller binary. The manager
-starts and the reconcilers run; per-driver parameter validation
-moves from admission to the reconcile loop and surfaces on
+Platforms without cert-manager use
+`deploy/kustomize/webhook-certgen/` (or the
+`deploy/kustomize/release-tls-selfsigned/` composition):
+kube-webhook-certgen Jobs mint the Secret and patch the caBundle,
+so the webhook stays enabled with zero cert infrastructure.
+
+`--enable-webhook=false` remains only as a last-resort escape
+hatch and is strongly discouraged. The manager starts and the
+reconcilers run; per-driver parameter validation moves from
+admission to the reconcile loop and surfaces on
 `Buckety.status.conditions` instead of failing the apply. CRD
 CEL still enforces spec.backend / spec.name / bucketyRef /
 credentialsSecretName immutability and the role/retentionPolicy

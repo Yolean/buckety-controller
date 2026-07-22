@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: buckety-webhook-certgen-patch
+  namespace: buckety
+spec:
+  # See job-create.yaml on the TTL. `patch` rewrites caBundle from
+  # the Secret every run; failures before the create Job finishes
+  # simply retry via OnFailure.
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: buckety-webhook-certgen
+      containers:
+      - name: patch
+        image: registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.9@sha256:01038e7de14b78d702d2849c3aad72fd25903c4765af63cf16aa3398f5d5f2dd
+        args:
+        - patch
+        - --namespace=buckety
+        - --secret-name=buckety-controller-webhook-tls
+        - --webhook-name=buckety-controller
+        - --patch-validating=true
+        - --patch-mutating=false
+        - --patch-failure-policy=Fail
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          seccompProfile: {type: RuntimeDefault}

@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: buckety-webhook-certgen-create
+  namespace: buckety
+spec:
+  # Completed Jobs self-delete so a later converge pass recreates
+  # and re-runs them; `create` keeps an existing Secret, so the
+  # rerun is a no-op once TLS is in place.
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: buckety-webhook-certgen
+      containers:
+      - name: create
+        image: registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.9@sha256:01038e7de14b78d702d2849c3aad72fd25903c4765af63cf16aa3398f5d5f2dd
+        args:
+        - create
+        - --namespace=buckety
+        - --secret-name=buckety-controller-webhook-tls
+        # controller-runtime's cert watcher wants these exact file
+        # names in the mounted Secret; certgen defaults differ.
+        - --cert-name=tls.crt
+        - --key-name=tls.key
+        - --host=buckety-controller-webhook.buckety.svc,buckety-controller-webhook.buckety.svc.cluster.local
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          seccompProfile: {type: RuntimeDefault}

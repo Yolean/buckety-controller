@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Self-signed webhook TLS without cert-manager: kube-webhook-certgen
+# Jobs mint the serving cert into the conventional Secret and patch
+# the ValidatingWebhookConfiguration caBundle. See README.md.
+# Compose next to ../release, or use ../release-tls-selfsigned.
+resources:
+- serviceaccount.yaml
+- rbac.yaml
+- job-create.yaml
+- job-patch.yaml
