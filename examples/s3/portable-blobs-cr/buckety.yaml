@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-objectstore.schema.json
 # One CR for any bucket-family backend (SPEC "Driver families").
 # Everything in spec is family-common and the backend name
 # "objects" is use-case-named, not driver-named; this file is

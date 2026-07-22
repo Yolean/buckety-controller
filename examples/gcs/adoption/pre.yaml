@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-gcs.schema.json
 # Collides with the pre-created, content-holding resource; the
 # default adoption policy (AdoptEmpty) must refuse it.
 apiVersion: buckety.yolean.se/v1alpha1
