@@ -1,0 +1,194 @@
+{
+  "$id": "https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Standalone editor schema for a Buckety against any backend. spec.parameters is unconstrained at this level; SPECIALIZE by switching the $schema URL suffix: buckety-objectstore (portable across bucket backends), buckety-gcs, buckety-s3, buckety-kadm.",
+  "properties": {
+    "apiVersion": {
+      "enum": [
+        "buckety.yolean.se/v1alpha1"
+      ],
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "Buckety"
+      ],
+      "type": "string"
+    },
+    "metadata": {
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "spec": {
+      "properties": {
+        "adoption": {
+          "default": "AdoptEmpty",
+          "description": "What happens when the resolved backend resource\nalready exists at first reconcile. AdoptEmpty (the\ndefault) adopts only content-free resources; Adopt\nclaims a resource with pre-existing content.\nAdopted resources are never deleted from the\nbackend, whatever retentionPolicy says. See SPEC.md\nsection \"Adoption\".\n",
+          "enum": [
+            "AdoptEmpty",
+            "Adopt"
+          ],
+          "type": "string"
+        },
+        "backend": {
+          "description": "Name of a backend defined in the controller's config\nfile. Immutable after creation.\n",
+          "minLength": 1,
+          "type": "string"
+        },
+        "defaultAccess": {
+          "description": "Single-consumer shortcut. Materialises an implicit\nBucketyAccess of the same name; reclaimed via\nowner-ref when an explicit BucketyAccess arrives or\nthis field is removed. See SPEC.md.\n",
+          "properties": {
+            "credentialsSecretName": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "role": {
+              "default": "ReadWrite",
+              "enum": [
+                "Reader",
+                "Writer",
+                "ReadWrite"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "credentialsSecretName"
+          ],
+          "type": "object"
+        },
+        "name": {
+          "description": "Optional name template. Resolved once at first\nreconcile and frozen in status.backendResourceName.\nDefaults to metadata.name if omitted. See SPEC.md\nsection \"Naming templates\" for the grammar.\n",
+          "type": "string"
+        },
+        "parameters": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Driver-validated parameters. Per-driver schema is\nenforced by the controller's admission webhook.\nMutable per-key per driver.\n",
+          "type": "object"
+        },
+        "retentionPolicy": {
+          "default": "Retain",
+          "description": "What happens to the backend resource when this\nBuckety is deleted.\n",
+          "enum": [
+            "Retain",
+            "Delete"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend"
+      ],
+      "type": "object"
+    },
+    "status": {
+      "properties": {
+        "backend": {
+          "description": "Sticky. Stamped at first reconcile.",
+          "type": "string"
+        },
+        "backendResourceName": {
+          "description": "Resolved name template. Sticky from first reconcile.\n",
+          "type": "string"
+        },
+        "conditions": {
+          "items": {
+            "properties": {
+              "lastTransitionTime": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "observedGeneration": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "True",
+                  "False",
+                  "Unknown"
+                ],
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "status",
+              "lastTransitionTime",
+              "reason",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "driver": {
+          "description": "Sticky. Stamped at first reconcile.",
+          "type": "string"
+        },
+        "driverBuildVersion": {
+          "description": "Full SemVer of the binary that most recently\nreconciled this resource. Informational.\n",
+          "type": "string"
+        },
+        "driverMajor": {
+          "description": "Sticky. Gates driver-version compatibility. See\nSPEC.md \"Driver versioning\".\n",
+          "type": "integer"
+        },
+        "observedGeneration": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "provenance": {
+          "description": "Created when the controller made the backend\nresource, Adopted when it claimed a pre-existing\none. Sticky. Absent on resources stamped before\nadoption tracking existed. DeleteBuckety only runs\nfor Created; see SPEC.md section \"Adoption\".\n",
+          "enum": [
+            "Created",
+            "Adopted"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "Buckety (any driver)",
+  "type": "object"
+}
