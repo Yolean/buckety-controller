@@ -1,7 +1,7 @@
 {
   "$id": "https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-gcs.schema.json",
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Standalone editor schema for a Buckety whose backend resolves to the gcs driver. GENERALIZE to buckety-objectstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints.",
+  "description": "Standalone editor schema for a Buckety whose backend resolves to the gcs driver. GENERALIZE to buckety-blobstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints.",
   "properties": {
     "apiVersion": {
       "enum": [

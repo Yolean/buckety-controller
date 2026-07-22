@@ -1,5 +1,5 @@
 {
-  "$id": "https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-objectstore.schema.json",
+  "$id": "https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-blobstore.schema.json",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "description": "Standalone editor schema for a Buckety carrying only object-store family-common parameters, provisionable on any bucket backend (gcs, s3) - see SPEC.md \"Driver families\". SPECIALIZE to buckety-gcs or buckety-s3 for driver-specific parameters; GENERALIZE to buckety for no parameter constraints.",
   "properties": {
@@ -202,6 +202,6 @@
     "metadata",
     "spec"
   ],
-  "title": "Buckety (objectstore)",
+  "title": "Buckety (blobstore)",
   "type": "object"
 }

@@ -9,7 +9,7 @@
 // maintainer walks by switching the URL:
 //
 //	buckety.schema.json               any driver, parameters unconstrained
-//	buckety-objectstore.schema.json   family-common parameters only (portable CR)
+//	buckety-blobstore.schema.json     family-common parameters only (portable CR)
 //	buckety-gcs.schema.json           full gcs driver parameters
 //	buckety-s3.schema.json            full s3 driver parameters
 //	buckety-kadm.schema.json          kadm driver parameters (no family)
@@ -41,13 +41,17 @@ func main() {
 		desc       string
 	}{
 		{"", "",
-			"Standalone editor schema for a Buckety against any backend. spec.parameters is unconstrained at this level; SPECIALIZE by switching the $schema URL suffix: buckety-objectstore (portable across bucket backends), buckety-gcs, buckety-s3, buckety-kadm."},
-		{"objectstore", "pkg/drivers/objectstore/schema/v0.1/parameters.schema.json",
+			"Standalone editor schema for a Buckety against any backend. spec.parameters is unconstrained at this level; SPECIALIZE by switching the $schema URL suffix: buckety-blobstore (portable across bucket backends), buckety-gcs, buckety-s3, buckety-kadm."},
+		// "blobstore" is the user-facing name of the object-store
+		// driver family (pkg/drivers/objectstore) - it matches how
+		// consumers talk about these resources (blobs namespaces
+		// etc), while the family package keeps the SPEC term.
+		{"blobstore", "pkg/drivers/objectstore/schema/v0.1/parameters.schema.json",
 			"Standalone editor schema for a Buckety carrying only object-store family-common parameters, provisionable on any bucket backend (gcs, s3) - see SPEC.md \"Driver families\". SPECIALIZE to buckety-gcs or buckety-s3 for driver-specific parameters; GENERALIZE to buckety for no parameter constraints."},
 		{"gcs", "pkg/drivers/gcs/schema/v0.1/parameters.schema.json",
-			"Standalone editor schema for a Buckety whose backend resolves to the gcs driver. GENERALIZE to buckety-objectstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints."},
+			"Standalone editor schema for a Buckety whose backend resolves to the gcs driver. GENERALIZE to buckety-blobstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints."},
 		{"s3", "pkg/drivers/s3/schema/v0.1/parameters.schema.json",
-			"Standalone editor schema for a Buckety whose backend resolves to the s3 driver. GENERALIZE to buckety-objectstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints."},
+			"Standalone editor schema for a Buckety whose backend resolves to the s3 driver. GENERALIZE to buckety-blobstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints."},
 		{"kadm", "pkg/drivers/kadm/schema/v0.1/parameters.schema.json",
 			"Standalone editor schema for a Buckety whose backend resolves to the kadm driver. kadm is deliberately not in a driver family (families are per service kind); GENERALIZE to buckety for no parameter constraints."},
 	}

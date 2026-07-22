@@ -568,8 +568,9 @@ publishes its family-common parameters the same way, under
 On top of these, `schema/` at the repo root carries GENERATED
 standalone whole-document schemas for editors (the
 kubernetes-json-schema pattern): `buckety.schema.json` plus one
-per family and per driver (`buckety-objectstore`, `buckety-gcs`,
-`buckety-s3`, `buckety-kadm`) and `bucketyaccess.schema.json`.
+per family and per driver (`buckety-blobstore` for the
+object-store family, `buckety-gcs`, `buckety-s3`,
+`buckety-kadm`) and `bucketyaccess.schema.json`.
 The suffix forms a specialize/generalize ladder walked by
 switching the URL: the family rung accepts only family-common
 parameters, so a resource annotated with it provably stays

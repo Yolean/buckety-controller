@@ -1,7 +1,7 @@
 {
   "$id": "https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety.schema.json",
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Standalone editor schema for a Buckety against any backend. spec.parameters is unconstrained at this level; SPECIALIZE by switching the $schema URL suffix: buckety-objectstore (portable across bucket backends), buckety-gcs, buckety-s3, buckety-kadm.",
+  "description": "Standalone editor schema for a Buckety against any backend. spec.parameters is unconstrained at this level; SPECIALIZE by switching the $schema URL suffix: buckety-blobstore (portable across bucket backends), buckety-gcs, buckety-s3, buckety-kadm.",
   "properties": {
     "apiVersion": {
       "enum": [

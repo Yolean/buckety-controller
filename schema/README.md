@@ -5,8 +5,12 @@ BucketyAccess yamls, annotated the same way as
 kubernetes-json-schema:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-objectstore.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-blobstore.schema.json
 ```
+
+"blobstore" is the user-facing name of the object-store driver
+family (`pkg/drivers/objectstore`); the schema suffix uses the
+name consumers reach for, the family package keeps the SPEC term.
 
 The suffix picks a rung on a specialize/generalize ladder; a
 maintainer moves a resource between rungs by switching the URL,
@@ -15,7 +19,7 @@ nothing else:
 | Schema | spec.parameters accepts |
 | --- | --- |
 | `buckety.schema.json` | anything (string values) - any driver |
-| `buckety-objectstore.schema.json` | object-store family-common only (`versioning`, `lifecycle` portable subset) - the resource stays provisionable on any bucket backend, gcs or s3 |
+| `buckety-blobstore.schema.json` | object-store family-common only (`versioning`, `lifecycle` portable subset) - the resource stays provisionable on any bucket backend, gcs or s3 |
 | `buckety-gcs.schema.json` | the full gcs driver set |
 | `buckety-s3.schema.json` | the full s3 driver set |
 | `buckety-kadm.schema.json` | the kadm driver set (`partitions`, `replicationFactor`, `config.*`) - kadm is not in a family |
