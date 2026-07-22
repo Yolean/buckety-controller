@@ -1,6 +1,8 @@
 package kadm
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -109,5 +111,55 @@ func checkErr(t *testing.T, err error, want string) {
 	}
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("error %q does not contain %q", err, want)
+	}
+}
+
+// Pins the published parameters schema to ValidateParameters in
+// both directions; see the gcs twin for rationale. The generated
+// whole-CR schemas (schema/) compose from this file.
+func TestParametersSchemaInSync(t *testing.T) {
+	raw, err := os.ReadFile("schema/v0.1/parameters.schema.json")
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var s struct {
+		Properties        map[string]json.RawMessage `json:"properties"`
+		PatternProperties map[string]json.RawMessage `json:"patternProperties"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+
+	for key := range s.Properties {
+		if verr := d.ValidateParameters(map[string]string{key: ""}); verr != nil && strings.Contains(verr.Error(), "unknown parameter") {
+			t.Errorf("schema property %q is unknown to ValidateParameters: %v", key, verr)
+		}
+	}
+	// The config.* pass-through advertised in the error message is
+	// published as patternProperties.
+	if len(s.PatternProperties) != 1 {
+		t.Errorf("expected exactly one patternProperties (config.*), got %d", len(s.PatternProperties))
+	}
+	if verr := d.ValidateParameters(map[string]string{"config.retention.ms": "1000"}); verr != nil {
+		t.Errorf("config.* pass-through rejected: %v", verr)
+	}
+
+	verr := d.ValidateParameters(map[string]string{"definitely-not-a-parameter": "x"})
+	if verr == nil {
+		t.Fatal("expected an unknown-parameter error")
+	}
+	msg := verr.Error()
+	i := strings.Index(msg, "accepts: ")
+	if i < 0 {
+		t.Fatalf("no 'accepts:' enumeration in %q", msg)
+	}
+	for _, tok := range strings.Split(strings.TrimSuffix(msg[i+len("accepts: "):], ")"), " ") {
+		tok = strings.Trim(tok, ",")
+		if tok == "" || tok == "and" || strings.Contains(tok, "*") {
+			continue
+		}
+		if _, ok := s.Properties[tok]; !ok {
+			t.Errorf("ValidateParameters advertises %q but the schema does not list it", tok)
+		}
 	}
 }

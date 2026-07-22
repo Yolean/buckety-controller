@@ -2,6 +2,7 @@ package gcs
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -424,4 +425,84 @@ func keysOf(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// The published parameters schema is hand-maintained next to
+// ValidateParameters; this pins the two together in both
+// directions so neither can outdate silently. The generated
+// whole-CR schemas (schema/) compose from this file, so this is
+// also their sync guard.
+func TestParametersSchemaInSync(t *testing.T) {
+	props := schemaProperties(t, "schema/v0.1/parameters.schema.json")
+	d := &Driver{cfg: &Config{Project: "p"}}
+
+	// Every schema property must be a code-known key: probing with
+	// an empty value may fail value validation, but never as
+	// "unknown parameter".
+	for key := range props {
+		if err := d.ValidateParameters(map[string]string{key: ""}); err != nil && strings.Contains(err.Error(), "unknown parameter") {
+			t.Errorf("schema property %q is unknown to ValidateParameters: %v", key, err)
+		}
+	}
+
+	// Every key the unknown-parameter message advertises must be
+	// in the schema; a parameter added in code but not published
+	// fails here.
+	for _, key := range acceptedKeysFromError(t, d.ValidateParameters(map[string]string{"definitely-not-a-parameter": "x"})) {
+		if _, ok := props[key]; !ok {
+			t.Errorf("ValidateParameters advertises %q but schema/v0.1/parameters.schema.json does not list it", key)
+		}
+	}
+
+	// Family portability (SPEC "Driver families" rule 1): every
+	// object-store family-common parameter must exist in this
+	// driver's schema too.
+	for key := range schemaProperties(t, "../objectstore/schema/v0.1/parameters.schema.json") {
+		if _, ok := props[key]; !ok {
+			t.Errorf("family parameter %q missing from the gcs parameters schema", key)
+		}
+	}
+}
+
+func schemaProperties(t *testing.T, path string) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var s struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return s.Properties
+}
+
+// acceptedKeysFromError extracts parameter names from the
+// "(<driver> ... accepts: a, b, c)" enumeration, skipping filler
+// words and capability qualifiers.
+func acceptedKeysFromError(t *testing.T, err error) []string {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected an unknown-parameter error to parse")
+	}
+	msg := err.Error()
+	i := strings.Index(msg, "accepts: ")
+	if i < 0 {
+		t.Fatalf("no 'accepts:' enumeration in %q", msg)
+	}
+	seg := strings.TrimSuffix(msg[i+len("accepts: "):], ")")
+	var keys []string
+	for _, tok := range strings.Split(seg, " ") {
+		tok = strings.Trim(tok, ",")
+		switch {
+		case tok == "" || tok == "and" || tok == "when":
+		case strings.Contains(tok, "="): // capability qualifier, not a key
+		case strings.Contains(tok, "*"): // pattern shorthand, checked separately
+		default:
+			keys = append(keys, tok)
+		}
+	}
+	return keys
 }
