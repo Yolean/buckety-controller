@@ -101,7 +101,7 @@ func init() {
 }
 
 // Config is the typed shape of the `config:` block under a gcs
-// backend. Mirrors pkg/drivers/gcs/schema/v0.1/config.schema.json.
+// backend. Mirrors pkg/drivers/gcs/schema/v0.2/config.schema.json.
 // Credential fields carry envsubst:"true" so ${VAR} interpolation
 // works at controller startup.
 type Config struct {

@@ -450,7 +450,7 @@ func TestParametersSchemaInSync(t *testing.T) {
 	// fails here.
 	for _, key := range acceptedKeysFromError(t, d.ValidateParameters(map[string]string{"definitely-not-a-parameter": "x"})) {
 		if _, ok := props[key]; !ok {
-			t.Errorf("ValidateParameters advertises %q but schema/v0.1/parameters.schema.json does not list it", key)
+			t.Errorf("ValidateParameters advertises %q but schema/v0.2/parameters.schema.json does not list it", key)
 		}
 	}
 
