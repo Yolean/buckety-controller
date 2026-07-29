@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-kadm.schema.json
 # Collides with the pre-created EMPTY resource; AdoptEmpty (the
 # default) adopts it silently.
 apiVersion: buckety.yolean.se/v1alpha1

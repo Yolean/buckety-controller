@@ -561,11 +561,27 @@ Each schema lives in the operator repo under
 `pkg/drivers/<driver>/schema/<major.minor>/*.schema.json` and is
 published via the GitHub raw URL (this is the publication
 mechanism — there's no separate registry). Versioning is the
-driver SemVer (see *Driver versioning*). Example YAMLs (in this
-repo and in consumer ystack) carry
-`# yaml-language-server: $schema=...` annotations pointing at
-the raw URL so editors validate before kubectl ever sees the
-file.
+driver SemVer (see *Driver versioning*). The object-store family
+publishes its family-common parameters the same way, under
+`pkg/drivers/objectstore/schema/`.
+
+On top of these, `schema/` at the repo root carries GENERATED
+standalone whole-document schemas for editors (the
+kubernetes-json-schema pattern): `buckety.schema.json` plus one
+per family and per driver (`buckety-blobstore` for the
+object-store family, `buckety-gcs`, `buckety-s3`,
+`buckety-kadm`) and `bucketyaccess.schema.json`.
+The suffix forms a specialize/generalize ladder walked by
+switching the URL: the family rung accepts only family-common
+parameters, so a resource annotated with it provably stays
+portable across bucket backends. `go run ./scripts/gen-cr-schemas`
+composes them from the CRD yamls and the parameters schemas; CI
+asserts the output is committed. Example YAMLs (in this repo and
+in consumer ystack) carry `# yaml-language-server: $schema=...`
+annotations pointing at the raw URL so editors validate before
+kubectl ever sees the file. Editor schemas are advisory: the
+admission webhook stays the authority, validating against the
+backend the CR names rather than the schema the file claims.
 
 ## Mutability
 

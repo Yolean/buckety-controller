@@ -1,8 +1,10 @@
 package s3
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -225,4 +227,72 @@ func TestIsNotImplemented(t *testing.T) {
 	if isNotImplemented(denied) {
 		t.Error("403 AccessDenied wrongly treated as not-implemented")
 	}
+}
+
+// Pins the published parameters schema to ValidateParameters in
+// both directions; see the gcs twin for rationale. The generated
+// whole-CR schemas (schema/) compose from this file.
+func TestParametersSchemaInSync(t *testing.T) {
+	props := schemaProperties(t, "schema/v0.1/parameters.schema.json")
+
+	// r2 driver so the capability-gated jurisdiction probes as
+	// value-invalid, not implementation-rejected.
+	for key := range props {
+		if err := r2Driver().ValidateParameters(map[string]string{key: ""}); err != nil && strings.Contains(err.Error(), "unknown parameter") {
+			t.Errorf("schema property %q is unknown to ValidateParameters: %v", key, err)
+		}
+	}
+
+	for _, key := range acceptedKeysFromError(t, bareDriver().ValidateParameters(map[string]string{"definitely-not-a-parameter": "x"})) {
+		if _, ok := props[key]; !ok {
+			t.Errorf("ValidateParameters advertises %q but schema/v0.1/parameters.schema.json does not list it", key)
+		}
+	}
+
+	// Family portability (SPEC "Driver families" rule 1).
+	for key := range schemaProperties(t, "../objectstore/schema/v0.1/parameters.schema.json") {
+		if _, ok := props[key]; !ok {
+			t.Errorf("family parameter %q missing from the s3 parameters schema", key)
+		}
+	}
+}
+
+func schemaProperties(t *testing.T, path string) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var s struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return s.Properties
+}
+
+func acceptedKeysFromError(t *testing.T, err error) []string {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected an unknown-parameter error to parse")
+	}
+	msg := err.Error()
+	i := strings.Index(msg, "accepts: ")
+	if i < 0 {
+		t.Fatalf("no 'accepts:' enumeration in %q", msg)
+	}
+	seg := strings.TrimSuffix(msg[i+len("accepts: "):], ")")
+	var keys []string
+	for _, tok := range strings.Split(seg, " ") {
+		tok = strings.Trim(tok, ",")
+		switch {
+		case tok == "" || tok == "and" || tok == "when":
+		case strings.Contains(tok, "="):
+		case strings.Contains(tok, "*"):
+		default:
+			keys = append(keys, tok)
+		}
+	}
+	return keys
 }
