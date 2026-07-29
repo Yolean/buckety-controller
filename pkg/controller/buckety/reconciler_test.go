@@ -244,3 +244,99 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 		t.Error("field change not patched")
 	}
 }
+
+// provisioningDriver stubs registry.Driver with EnsureBuckety
+// answering ErrProvisioningInProgress until released.
+type provisioningDriver struct{ inProgress bool }
+
+func (p *provisioningDriver) Name() string    { return "prov" }
+func (p *provisioningDriver) Version() string { return "0.0.1" }
+func (p *provisioningDriver) InspectBuckety(context.Context, string) (registry.Inspection, error) {
+	return registry.Inspection{}, nil
+}
+func (p *provisioningDriver) EnsureBuckety(context.Context, registry.EnsureRequest) error {
+	if p.inProgress {
+		return &registry.ErrProvisioningInProgress{Progress: "service account x is not yet bindable"}
+	}
+	return nil
+}
+func (p *provisioningDriver) DeleteBuckety(context.Context, registry.DeleteRequest) error { return nil }
+func (p *provisioningDriver) GrantAccess(context.Context, registry.GrantRequest) (registry.GrantResult, error) {
+	return registry.GrantResult{}, nil
+}
+func (p *provisioningDriver) RevokeAccess(context.Context, string) error            { return nil }
+func (p *provisioningDriver) ValidateParameters(map[string]string) error            { return nil }
+func (p *provisioningDriver) ValidateUpdateParameters(_, _ map[string]string) error { return nil }
+func (p *provisioningDriver) ValidateAccessParameters(map[string]string) error      { return nil }
+func (p *provisioningDriver) ValidateResourceName(string) error                     { return nil }
+
+// ISSUE_service_account_propagation_on_first_bind.md: an
+// EnsureBuckety in-progress answer is a prompt requeue with a
+// Provisioning condition, not an error - first provisioning of a
+// young resource must not surface Warning + Ready=False backoff.
+func TestProvisioningInProgressRequeuesWithoutError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	bky := &bucketyv1.Buckety{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orders", Namespace: "t1",
+			Finalizers: []string{bucketyv1.FinalizerCleanup},
+		},
+		Spec: bucketyv1.BucketySpec{Backend: "be"},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky).
+		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+		Build()
+	drv := &provisioningDriver{inProgress: true}
+	r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{
+		Backends: map[string]config.Backend{"be": {Name: "be", Driver: drv}},
+	}}
+	key := types.NamespacedName{Namespace: "t1", Name: "orders"}
+	req := reconcile.Request{NamespacedName: key}
+
+	res, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("in-progress surfaced as reconcile error: %v", err)
+	}
+	if res.RequeueAfter <= 0 || res.RequeueAfter > 10e9 {
+		t.Errorf("want prompt RequeueAfter, got %+v", res)
+	}
+	var got bucketyv1.Buckety
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range got.Status.Conditions {
+		if c.Type == "Ready" && c.Reason == "Provisioning" && c.Status == metav1.ConditionFalse {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Provisioning condition missing: %+v", got.Status.Conditions)
+	}
+
+	// Propagation done: next reconcile goes Ready.
+	drv.inProgress = false
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	ready := false
+	for _, c := range got.Status.Conditions {
+		if c.Type == "Ready" && c.Status == metav1.ConditionTrue {
+			ready = true
+		}
+	}
+	if !ready {
+		t.Errorf("not Ready after provisioning completed: %+v", got.Status.Conditions)
+	}
+}

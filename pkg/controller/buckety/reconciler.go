@@ -262,6 +262,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Paused", "drift requires human resolution", bky.Generation)
 			return ctrl.Result{}, r.patchStatus(ctx, &bky, baseBky)
 		}
+		if registry.IsProvisioningInProgress(err) {
+			// The backend needs a moment, not a fix (freshly
+			// created SA awaiting IAM propagation): Normal event,
+			// prompt requeue - the DeletingContents posture, not
+			// the EnsureFailed one, whose Warning + backoff would
+			// misreport a merely-young resource as broken.
+			r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "Provisioning",
+				corev1.EventTypeNormal, "Provisioning", err.Error())
+			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "Provisioning", err.Error(), bky.Generation)
+			if perr := r.patchStatus(ctx, &bky, baseBky); perr != nil {
+				return ctrl.Result{}, perr
+			}
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
 		log.Error(err, "driver.EnsureBuckety failed")
 		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed",
 			corev1.EventTypeWarning, "EnsureFailed", err.Error())

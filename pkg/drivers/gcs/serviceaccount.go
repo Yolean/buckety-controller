@@ -22,6 +22,8 @@ import (
 	"time"
 
 	iam "google.golang.org/api/iam/v1"
+
+	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
 
 // saNameRE is GCP's service account ID rule: 6-30 characters,
@@ -133,9 +135,34 @@ func (d *Driver) ensureBucketBinding(ctx context.Context, bucket, email string) 
 	}
 	policy.Add(member, saBucketRole)
 	if err := handle.SetPolicy(ctx, policy); err != nil {
-		return fmt.Errorf("gcs: grant %s to %s on bucket %q (needs storage.buckets.setIamPolicy): %w", saBucketRole, member, bucket, err)
+		if isForbidden(err) {
+			// The permission hint belongs to 403 ONLY: attaching it
+			// to the member-validation 400 below sent operators
+			// auditing IAM roles for what is a timing condition.
+			return fmt.Errorf("gcs: grant %s to %s on bucket %q (needs storage.buckets.setIamPolicy): %w", saBucketRole, member, bucket, err)
+		}
+		if isMemberNotPropagated(err) {
+			// A just-created (or just-recreated) SA is not yet
+			// usable as an IAM member; GCP refuses it as a
+			// member-validation 400 "does not exist" - reading as a
+			// missing account when the account is merely seconds
+			// old. Typed so the reconciler requeues promptly
+			// instead of surfacing a Warning failure; the
+			// re-asserted binding lands once IAM has propagated.
+			return &registry.ErrProvisioningInProgress{Progress: fmt.Sprintf(
+				"service account %s was just created and is not yet bindable on bucket %q; IAM propagation takes a few seconds", email, bucket)}
+		}
+		return fmt.Errorf("gcs: grant %s to %s on bucket %q: %w", saBucketRole, member, bucket, err)
 	}
 	return nil
+}
+
+// isMemberNotPropagated matches setIamPolicy's member-validation
+// refusal of a not-yet-propagated service account: HTTP 400 (not
+// 404 - it is policy validation, not an account lookup) with the
+// account named as nonexistent.
+func isMemberNotPropagated(err error) bool {
+	return gapiCode(err, 400) && strings.Contains(err.Error(), "does not exist")
 }
 
 // ensureAccessKey returns the access's SA key JSON and key id,

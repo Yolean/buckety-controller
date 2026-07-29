@@ -33,6 +33,11 @@ type fakeGCP struct {
 	// tombstoned emails 404 on Get but still 409 on Create,
 	// GCP's ~30-day soft-deletion name reservation.
 	tombstoned map[string]bool
+	// bindRefusals makes the next N setIamPolicy calls fail with
+	// GCP's member-validation 400 for a not-yet-propagated SA;
+	// bindForbidden with a 403.
+	bindRefusals  int
+	bindForbidden int
 }
 
 type policyBinding struct {
@@ -185,6 +190,16 @@ func newFakeGCP(t *testing.T, project string) (*fakeGCP, *httptest.Server) {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.bindRefusals > 0 {
+			f.bindRefusals--
+			writeErr(w, 400, "Service account somebody@somewhere.iam.gserviceaccount.com does not exist., invalid")
+			return
+		}
+		if f.bindForbidden > 0 {
+			f.bindForbidden--
+			writeErr(w, 403, "does not have storage.buckets.setIamPolicy access")
+			return
+		}
 		f.policies[r.PathValue("bucket")] = body.Bindings
 		f.setPolicyCalls++
 		writeJSON(w, map[string]any{
@@ -703,5 +718,47 @@ func TestHMACOptOut(t *testing.T) {
 		if _, ok := res.SecretData[k]; ok {
 			t.Errorf("coordinates-only Secret carries %s", k)
 		}
+	}
+}
+
+// ISSUE_service_account_propagation_on_first_bind.md: a freshly
+// created SA is not immediately usable as an IAM member, so the
+// first setIamPolicy answers a member-validation 400 "does not
+// exist". That is a timing condition, not a failure: typed as
+// ErrProvisioningInProgress (prompt requeue, Normal event), with
+// the needs-setIamPolicy permission hint reserved for real 403s.
+func TestBindPropagationWindow(t *testing.T) {
+	f, srv := newFakeGCP(t, "id-proj")
+	d := saDriver(t, srv)
+	ctx := context.Background()
+	f.mu.Lock()
+	f.bindRefusals = 1
+	f.mu.Unlock()
+
+	err := d.ensureServiceAccount(ctx, "orders-t1", "bucket-x")
+	if !registry.IsProvisioningInProgress(err) {
+		t.Fatalf("propagation 400 not typed as in-progress: %v", err)
+	}
+	if strings.Contains(err.Error(), "setIamPolicy") {
+		t.Errorf("permission hint attached to the timing 400: %v", err)
+	}
+
+	// Next reconcile: propagated, binding lands.
+	if err := d.ensureServiceAccount(ctx, "orders-t1", "bucket-x"); err != nil {
+		t.Fatalf("post-propagation ensure: %v", err)
+	}
+	if !f.hasBinding("bucket-x", saBucketRole, "serviceAccount:orders-t1@id-proj.iam.gserviceaccount.com") {
+		t.Error("binding missing after propagation")
+	}
+
+	// A genuine 403 keeps the actionable permission hint and is a
+	// real error, not in-progress.
+	f.mu.Lock()
+	f.policies["bucket-x"] = nil
+	f.bindForbidden = 1
+	f.mu.Unlock()
+	err = d.ensureServiceAccount(ctx, "orders-t1", "bucket-x")
+	if err == nil || registry.IsProvisioningInProgress(err) || !strings.Contains(err.Error(), "setIamPolicy") {
+		t.Errorf("403 handling: %v", err)
 	}
 }

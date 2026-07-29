@@ -42,3 +42,15 @@ func TestIsParameterDrift(t *testing.T) {
 		t.Fatal("unrelated error detected as drift")
 	}
 }
+
+func TestIsProvisioningInProgress(t *testing.T) {
+	if !IsProvisioningInProgress(&ErrProvisioningInProgress{Progress: "x"}) {
+		t.Fatal("direct ErrProvisioningInProgress not detected")
+	}
+	if IsProvisioningInProgress(json.Unmarshal([]byte("{"), &struct{}{})) {
+		t.Fatal("unrelated error detected as in-progress")
+	}
+	if IsProvisioningInProgress(&ErrDeletionInProgress{Progress: "x"}) {
+		t.Fatal("deletion-in-progress detected as provisioning")
+	}
+}

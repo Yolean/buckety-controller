@@ -228,6 +228,29 @@ func IsParameterDrift(err error) bool {
 	return errors.As(err, &d)
 }
 
+// ErrProvisioningInProgress is the typed error EnsureBuckety
+// returns when the backend needs a moment rather than a fix: a
+// freshly created GCS service account is not yet usable as an
+// IAM member (propagation takes seconds, occasionally longer),
+// so the first bucket binding is EXPECTED to be refused. Not a
+// failure: the controller surfaces Progress with a Normal event
+// and requeues promptly, instead of a Warning + backoff that
+// misreports a merely-young resource as broken.
+type ErrProvisioningInProgress struct {
+	Progress string
+}
+
+func (e *ErrProvisioningInProgress) Error() string {
+	return "provisioning in progress: " + e.Progress
+}
+
+// IsProvisioningInProgress reports whether err is or wraps an
+// ErrProvisioningInProgress.
+func IsProvisioningInProgress(err error) bool {
+	var p *ErrProvisioningInProgress
+	return errors.As(err, &p)
+}
+
 // ErrDeletionInProgress is the typed error DeleteBuckety returns
 // when a bounded slice of recursive deletion completed but
 // contents remain. Not a failure: the controller surfaces
