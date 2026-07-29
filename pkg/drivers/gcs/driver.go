@@ -526,7 +526,7 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 	if region != "" {
 		data["region"] = []byte(region)
 	}
-	principal := "gcs-static"
+	principal, revocable := "gcs-static", false
 	if sa := req.BucketyParameters["serviceAccount"]; sa != "" {
 		if d.iamsvc == nil {
 			// Validation rejects the parameter on non-enabled
@@ -544,11 +544,13 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 		data["serviceAccountEmail"] = []byte(email)
 		data["serviceAccountKeyId"] = []byte(keyID)
 		principal = d.saResource(email) + "/keys/" + keyID
+		revocable = true
 	}
 	return registry.GrantResult{
 		SecretData: data,
 		Principal:  principal,
 		Scoped:     false,
+		Revocable:  revocable,
 	}, nil
 }
 

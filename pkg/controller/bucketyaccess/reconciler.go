@@ -138,13 +138,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				return ctrl.Result{}, bkyErr
 			case bkyErr == nil:
 				backend, ok := r.Config.Lookup(bky.Spec.Backend)
-				if !ok && access.Status.Principal != "" {
-					// A principal exists but no backend to revoke it
-					// against. Letting the finalizer go would orphan
-					// the credential, so deletion blocks with the
+				if !ok && access.Status.PrincipalRevocable {
+					// A minted credential exists but no backend to
+					// revoke it against. Letting the finalizer go
+					// would orphan it, so deletion blocks with the
 					// same remedy as Buckety deletion under
 					// retentionPolicy=Delete: restore the backend in
-					// buckety-controller.yaml.
+					// buckety-controller.yaml. Static shared
+					// principals (Revocable=false) release as in
+					// v1alpha1 - their revoke is a no-op, and
+					// blocking them would wedge scenarios like
+					// backend renames.
 					base := access.DeepCopy()
 					msg := fmt.Sprintf("cannot revoke principal %q: backend %q is not registered in buckety-controller.yaml; restore it to let this BucketyAccess go", access.Status.Principal, bky.Spec.Backend)
 					r.eventIfTransition(&access, base.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable",
@@ -359,6 +363,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 	access.Status.Principal = res.Principal
+	access.Status.PrincipalRevocable = res.Revocable
 
 	// ScopingNotImplemented if the driver is not actually
 	// scoping per role and the user asked for something other

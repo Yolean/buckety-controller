@@ -414,8 +414,11 @@ func TestReplacedPrincipalRevoked(t *testing.T) {
 }
 
 // Deleting an access whose backend is missing from config must
-// BLOCK while a principal exists (releasing the finalizer would
-// orphan the credential), and proceed when nothing was granted.
+// BLOCK while a REVOCABLE principal exists (releasing the
+// finalizer would orphan the credential), and proceed for static
+// shared principals - whose revoke is a no-op - exactly as in
+// v1alpha1, or backend renames wedge every access teardown (seen
+// as backend-stickiness e2e failures across all drivers).
 func TestDeletionBlocksWithoutBackend(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -425,7 +428,7 @@ func TestDeletionBlocksWithoutBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	newAccess := func(principal string) (*bucketyv1.Buckety, *bucketyv1.BucketyAccess) {
+	newAccess := func(principal string, revocable bool) (*bucketyv1.Buckety, *bucketyv1.BucketyAccess) {
 		bky := &bucketyv1.Buckety{
 			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "t1"},
 			Spec:       bucketyv1.BucketySpec{Backend: "gone"},
@@ -439,12 +442,12 @@ func TestDeletionBlocksWithoutBackend(t *testing.T) {
 				BucketyRef:            bucketyv1.BucketyRef{Name: "orders"},
 				CredentialsSecretName: "reader-creds",
 			},
-			Status: bucketyv1.BucketyAccessStatus{Principal: principal},
+			Status: bucketyv1.BucketyAccessStatus{Principal: principal, PrincipalRevocable: revocable},
 		}
 	}
 
-	// Principal present: blocked with a condition.
-	bky, access := newAccess("projects/p/serviceAccounts/x/keys/k1")
+	// Revocable principal: blocked with a condition.
+	bky, access := newAccess("projects/p/serviceAccounts/x/keys/k1", true)
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(bky, access).
 		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
@@ -470,20 +473,23 @@ func TestDeletionBlocksWithoutBackend(t *testing.T) {
 		t.Errorf("no blocking condition: %+v", got.Status.Conditions)
 	}
 
-	// No principal ever granted: deletion proceeds.
-	bky, access = newAccess("")
-	cl = fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(bky, access).
-		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
-		Build()
-	r = &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{Backends: map[string]config.Backend{}}}
-	if err := cl.Delete(ctx, access); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Reconcile(ctx, reconcilerRequest("t1", "reader")); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "t1", Name: "reader"}, &got); !apierrors.IsNotFound(err) {
-		t.Errorf("ungrated access not released: %v", err)
+	// Static shared principal (revoke is a no-op): released, as in
+	// v1alpha1 - this is what backend-stickiness scenarios do.
+	for _, principal := range []string{"gcs-static", ""} {
+		bky, access = newAccess(principal, false)
+		cl = fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(bky, access).
+			WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+			Build()
+		r = &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{Backends: map[string]config.Backend{}}}
+		if err := cl.Delete(ctx, access); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Reconcile(ctx, reconcilerRequest("t1", "reader")); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "t1", Name: "reader"}, &got); !apierrors.IsNotFound(err) {
+			t.Errorf("access with principal %q not released: %v", principal, err)
+		}
 	}
 }

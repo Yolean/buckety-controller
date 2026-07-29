@@ -929,7 +929,12 @@ deletion more conservative.
 
 - Both kinds carry a finalizer `buckety.yolean.se/cleanup`.
 - `BucketyAccess` deletion blocks on `RevokeAccess` succeeding
-  (in v1alpha1 the no-op revoke completes immediately).
+  (in v1alpha1 the no-op revoke completes immediately). When the
+  backend is missing from config, deletion blocks only for
+  principals the driver stamped revocable
+  (`status.principalRevocable`, from `GrantResult.Revocable` -
+  gcs SA keys); static shared principals release as before, so
+  backend renames do not wedge access teardown.
 - `Buckety` deletion blocks on (a) all referencing
   `BucketyAccess` being gone — controller does NOT cascade-delete
   them; it surfaces a `BlockedByAccesses` condition with the

@@ -424,6 +424,9 @@ func TestGrantAccessKeyLifecycle(t *testing.T) {
 	if res1.Scoped {
 		t.Error("bucket-scoped SA must still report Scoped=false (role scoping is not implemented)")
 	}
+	if !res1.Revocable {
+		t.Error("minted key principal must report Revocable=true")
+	}
 	// HMAC pair still present (additive keys per SPEC).
 	if string(res1.SecretData["accessKeyID"]) != "id" || string(res1.SecretData["bucket"]) != "bucket-x" {
 		t.Errorf("base payload regressed: %v", keysOf(res1.SecretData))
@@ -632,6 +635,9 @@ func TestServiceAccountEmptyOptOut(t *testing.T) {
 	}
 	if res.Principal != "gcs-static" {
 		t.Errorf("principal: %q", res.Principal)
+	}
+	if res.Revocable {
+		t.Error("static principal must report Revocable=false")
 	}
 }
 

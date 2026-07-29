@@ -349,6 +349,15 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		}
 		// The access deletion re-enqueues this Buckety via the
 		// access watch; the short requeue covers a lost event.
+		// Normally one pass - but a revocable principal with its
+		// backend missing blocks the access (with its own
+		// condition), so say what is being waited on.
+		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokingAccesses",
+			fmt.Sprintf("waiting for implicit BucketyAccess %q to revoke before teardown", a.Name),
+			bky.Generation)
+		if err := r.Status().Patch(ctx, bky, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 

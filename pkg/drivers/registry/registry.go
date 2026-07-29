@@ -177,6 +177,15 @@ type GrantResult struct {
 	// surfaces ScopingNotImplemented=True when this is false and
 	// Role != ReadWrite.
 	Scoped bool
+	// Revocable reports whether Principal names a credential
+	// minted for THIS access that RevokeAccess must remove
+	// backend-side (a gcs SA key), as opposed to a shared static
+	// principal whose revoke is a no-op. Stamped into
+	// status.principalRevocable; the reconciler blocks deletion
+	// on a missing backend only for revocable principals, so
+	// static-credential accesses keep v1alpha1's release
+	// semantics.
+	Revocable bool
 }
 
 // Factory builds a Driver from its raw `config:` block as it

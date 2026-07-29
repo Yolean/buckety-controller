@@ -240,6 +240,14 @@ type BucketyAccessStatus struct {
 	// per-consumer scoping is not implemented.
 	Principal string `json:"principal,omitempty"`
 
+	// PrincipalRevocable is whether Principal names a credential
+	// the driver minted for this access and must revoke
+	// backend-side (a gcs SA key), as opposed to a shared static
+	// principal whose revoke is a no-op. Deletion with the backend
+	// missing from config blocks only for revocable principals;
+	// static ones release as in v1alpha1.
+	PrincipalRevocable bool `json:"principalRevocable,omitempty"`
+
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
