@@ -29,6 +29,9 @@ type Inputs struct {
 	Namespace       string
 	Labels          map[string]string
 	BackendDefaults map[string]string
+	// noLabels rejects ${label[...]} references; set only by
+	// ResolveParameters (see there for why).
+	noLabels bool
 }
 
 // Resolve substitutes the supported variables in tmpl against
@@ -70,6 +73,49 @@ func Resolve(tmpl string, inputs Inputs) (string, error) {
 	return b.String(), nil
 }
 
+// ResolveParameters returns a copy of params with the values of
+// the declared keys template-resolved; undeclared keys pass
+// through untouched. Parameter templates use a restricted
+// grammar: ${name}, ${namespace} and ${backend.X} only.
+// ${label[...]} is rejected because parameters are re-resolved on
+// every reconcile - a label edit would silently drift the
+// resolved value (a service account name, say) - whereas
+// spec.name gets away with label references only because its
+// resolution is frozen into status.backendResourceName at first
+// reconcile.
+func ResolveParameters(params map[string]string, keys []string, in Inputs) (map[string]string, error) {
+	if len(params) == 0 || len(keys) == 0 {
+		return params, nil
+	}
+	in.Labels = nil
+	in.noLabels = true
+	var out map[string]string
+	for _, k := range keys {
+		tmpl, ok := params[k]
+		if !ok {
+			continue
+		}
+		resolved, err := Resolve(tmpl, in)
+		if err != nil {
+			return nil, fmt.Errorf("parameters.%s: %w", k, err)
+		}
+		if resolved == tmpl {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(params))
+			for pk, pv := range params {
+				out[pk] = pv
+			}
+		}
+		out[k] = resolved
+	}
+	if out == nil {
+		return params, nil
+	}
+	return out, nil
+}
+
 // labelRE matches the label['key'] form. The key may contain
 // the full K8s label-key shape (DNS-1123 names with an optional
 // `<prefix>/` discriminator) but no closing bracket or quote.
@@ -92,6 +138,9 @@ func resolveOne(expr string, in Inputs) (string, error) {
 		return in.Namespace, nil
 	}
 	if m := labelRE.FindStringSubmatch(expr); m != nil {
+		if in.noLabels {
+			return "", fmt.Errorf("${%s}: parameter templates support ${name}, ${namespace} and ${backend.X} only; labels are mutable and would drift the re-resolved value", expr)
+		}
 		key := m[1]
 		v, ok := in.Labels[key]
 		if !ok {

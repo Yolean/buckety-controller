@@ -25,13 +25,29 @@
 // The static pair is copied identically to every BucketyAccess and
 // the reconciler surfaces ScopingNotImplemented for non-ReadWrite
 // roles - the same v1alpha1 posture as the s3 driver's root keys.
-// Driver-minted per-access credentials (an HMAC key or a
-// bucket-scoped service account per access) are deliberately NOT
-// in v0.1: GrantAccess runs on every reconcile and rewrites the
-// Secret from its result, and an HMAC secret is only retrievable
-// at creation, so per-access minting needs the v1alpha2 scoping
-// design (grant-once semantics, access identity in GrantRequest)
-// before it can be idempotent.
+//
+// v0.2 adds opt-in per-bucket service accounts (see
+// serviceaccount.go): a backend that enables `serviceAccounts` in
+// its config lets a Buckety declare parameters.serviceAccount, and
+// the driver then maintains a dedicated GCP service account bound
+// to just that bucket (roles/storage.objectAdmin, bucket-level)
+// plus one user-managed key per BucketyAccess, written to the
+// Secret as serviceAccountKey/serviceAccountEmail/
+// serviceAccountKeyId alongside the static HMAC pair. Keys are
+// only retrievable at creation, so GrantAccess - which runs on
+// every reconcile and rewrites the Secret from its result - reuses
+// the key found in GrantRequest.ExistingSecretData while it still
+// verifies against keys.list, and mints only when absent, revoked
+// out of band, or expired. Scheduled key rotation is a roadmap
+// item (SPEC §Roadmap); until then rotation is operator-driven:
+// delete the key server-side and the next reconcile re-mints.
+//
+// The serviceAccounts config names the GCP project the SAs live
+// in. A DEDICATED identity project (separate from the bucket
+// project) is strongly recommended: key creation on an SA equals
+// impersonating it, so the controller's serviceAccountAdmin/
+// serviceAccountKeyAdmin grants must be confined to a project
+// whose only identities are the ones minted here.
 package gcs
 
 import (
@@ -50,7 +66,9 @@ import (
 	"cloud.google.com/go/storage"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/googleapi"
+	iam "google.golang.org/api/iam/v1"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 
 	"github.com/Yolean/buckety-controller/pkg/drivers/objectstore"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
@@ -63,10 +81,12 @@ const DriverName = "gcs"
 
 // version is the driver SemVer. Injected at build time via
 //
-//	-ldflags '-X github.com/Yolean/buckety-controller/pkg/drivers/gcs.version=0.1.0'
+//	-ldflags '-X github.com/Yolean/buckety-controller/pkg/drivers/gcs.version=0.2.0'
 //
 // per SPEC §Driver versioning. Default keeps tests building.
-var version = "0.1.0"
+// 0.2.0: additive serviceAccount parameter + Secret keys (minor
+// bump per SPEC compatibility rules).
+var version = "0.2.0"
 
 // globalEndpoint is the S3-interop host written to access
 // Secrets for buckets whose location has no locational endpoint
@@ -81,7 +101,7 @@ func init() {
 }
 
 // Config is the typed shape of the `config:` block under a gcs
-// backend. Mirrors pkg/drivers/gcs/schema/v0.1/config.schema.json.
+// backend. Mirrors pkg/drivers/gcs/schema/v0.2/config.schema.json.
 // Credential fields carry envsubst:"true" so ${VAR} interpolation
 // works at controller startup.
 type Config struct {
@@ -101,9 +121,37 @@ type Config struct {
 	Region string `json:"region,omitempty"`
 	// AccessKeyID / SecretAccessKey are the static HMAC pair copied
 	// into every access Secret (see the package comment for why
-	// v0.1 does not mint per-access keys).
+	// v0.2 still carries them even with serviceAccounts enabled).
 	AccessKeyID     string `json:"accessKeyID" envsubst:"true"`
 	SecretAccessKey string `json:"secretAccessKey" envsubst:"true"`
+	// ServiceAccounts opts this backend into per-bucket service
+	// accounts (parameters.serviceAccount). Nil disables the
+	// feature and rejects the parameter, keeping HMAC-only
+	// deployments free of IAM API calls and permissions.
+	ServiceAccounts *ServiceAccountsConfig `json:"serviceAccounts,omitempty"`
+}
+
+// ServiceAccountsConfig gates and locates per-bucket service
+// accounts. Mirrors schema/v0.2/config.schema.json.
+type ServiceAccountsConfig struct {
+	// Project is the GCP project the per-bucket service accounts
+	// are created in. Strongly recommended to be a DEDICATED
+	// identity project separate from the bucket project: the
+	// controller needs roles/iam.serviceAccountAdmin +
+	// roles/iam.serviceAccountKeyAdmin here, and key creation
+	// equals impersonation, so this grant must not extend to
+	// projects holding unrelated service accounts. Cross-project
+	// bucket IAM bindings make the split free.
+	Project string `json:"project"`
+	// Endpoint overrides the IAM API endpoint (full URL), e.g.
+	// for Private Service Connect. Authentication stays on unless
+	// Insecure is also set; unset reaches iam.googleapis.com.
+	Endpoint string `json:"endpoint,omitempty"`
+	// Insecure disables authentication on Endpoint, for emulators
+	// and tests ONLY. A separate explicit flag so that an
+	// endpoint typo cannot silently turn credentials off
+	// (checkit review finding 4). Requires Endpoint.
+	Insecure bool `json:"insecure,omitempty"`
 }
 
 func factory(raw json.RawMessage) (registry.Driver, error) {
@@ -136,13 +184,39 @@ func factory(raw json.RawMessage) (registry.Driver, error) {
 		return nil, fmt.Errorf("gcs config: client init (is GOOGLE_APPLICATION_CREDENTIALS set?): %w", err)
 	}
 
-	return &Driver{cfg: &c, client: cl}, nil
+	// The IAM admin client exists only when the backend opts in,
+	// so HMAC-only deployments need neither the iam.googleapis.com
+	// API enabled nor any IAM permissions.
+	var iamsvc *iam.Service
+	if c.ServiceAccounts != nil {
+		if c.ServiceAccounts.Project == "" {
+			return nil, fmt.Errorf("gcs config: serviceAccounts: missing required field %q (a dedicated identity project, separate from the bucket project, is strongly recommended)", "project")
+		}
+		if c.ServiceAccounts.Insecure && c.ServiceAccounts.Endpoint == "" {
+			return nil, fmt.Errorf("gcs config: serviceAccounts.insecure requires serviceAccounts.endpoint (it disables authentication towards that endpoint; emulators and tests only)")
+		}
+		var opts []option.ClientOption
+		if ep := c.ServiceAccounts.Endpoint; ep != "" {
+			opts = append(opts, option.WithEndpoint(ep))
+		}
+		if c.ServiceAccounts.Insecure {
+			opts = append(opts, option.WithoutAuthentication())
+		}
+		iamsvc, err = iam.NewService(context.Background(), opts...)
+		if err != nil {
+			return nil, fmt.Errorf("gcs config: IAM client init for serviceAccounts: %w", err)
+		}
+	}
+
+	return &Driver{cfg: &c, client: cl, iamsvc: iamsvc}, nil
 }
 
 // Driver implements registry.Driver for Google Cloud Storage.
 type Driver struct {
 	cfg    *Config
 	client *storage.Client
+	// iamsvc is non-nil iff cfg.ServiceAccounts is set.
+	iamsvc *iam.Service
 }
 
 func (d *Driver) Name() string    { return DriverName }
@@ -189,6 +263,16 @@ func (d *Driver) InspectBuckety(ctx context.Context, name string) (registry.Insp
 }
 
 func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) error {
+	if err := d.ensureBucket(ctx, req); err != nil {
+		return err
+	}
+	if sa := req.Parameters["serviceAccount"]; sa != "" {
+		return d.ensureServiceAccount(ctx, sa, req.Name)
+	}
+	return nil
+}
+
+func (d *Driver) ensureBucket(ctx context.Context, req registry.EnsureRequest) error {
 	bkt := d.client.Bucket(req.Name)
 	attrs, err := bkt.Attrs(ctx)
 	switch {
@@ -253,7 +337,21 @@ func (d *Driver) reconcileExisting(ctx context.Context, bkt *storage.BucketHandl
 // obstacle to work around. Soft-deleted objects do not block
 // bucket deletion; with a soft delete policy the bucket itself
 // remains restorable for the configured window.
-func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
+func (d *Driver) DeleteBuckety(ctx context.Context, req registry.DeleteRequest) error {
+	if err := d.deleteBucket(ctx, req.Name); err != nil {
+		return err
+	}
+	// The per-bucket service account goes with the bucket. Only
+	// after the bucket is fully gone: earlier passes return
+	// ErrDeletionInProgress above, and a bucket that fails
+	// deletion keeps its data-plane identity intact.
+	if sa := req.Parameters["serviceAccount"]; sa != "" && d.iamsvc != nil {
+		return d.deleteServiceAccount(ctx, sa, req.Name)
+	}
+	return nil
+}
+
+func (d *Driver) deleteBucket(ctx context.Context, name string) error {
 	noList := false
 	live, err := d.emptyBucketSlice(ctx, name)
 	switch {
@@ -364,20 +462,31 @@ func (d *Driver) emptyBucketSlice(ctx context.Context, name string) (int, error)
 }
 
 // GrantAccess returns the gcs Secret payload for a BucketyAccess:
-// the backend's static HMAC pair, identical for all roles.
-// Scoped=false signals the reconciler to surface
-// ScopingNotImplemented for non-ReadWrite roles.
+// the backend's static HMAC pair, identical for all roles, plus -
+// when the Buckety opted into a per-bucket service account - one
+// user-managed SA key minted for THIS access. Scoped stays false
+// either way: the SA is scoped to the bucket, not to the role, so
+// the reconciler still surfaces ScopingNotImplemented for
+// non-ReadWrite roles.
 //
 // Secret keys per SPEC §Secret output > gcs driver:
 //
 //	endpoint, bucket, project, region (when known),
-//	accessKeyID, secretAccessKey
+//	accessKeyID, secretAccessKey,
+//	serviceAccountKey, serviceAccountEmail, serviceAccountKeyId
+//	  (the last three only with parameters.serviceAccount)
 //
 // `bucket` is the resource-type key per the SPEC's stable
 // per-driver convention. endpoint/region are derived from the
 // bucket's location unless the backend config overrides them
 // (issue #14: signing for a EUROPE-WEST4 bucket against the
 // global host breaks SigV4 and data residency).
+//
+// The SA key private material is only retrievable at creation, so
+// the key found in ExistingSecretData is returned unchanged while
+// keys.list still verifies it (see ensureAccessKey); Principal is
+// the key's full resource name, which is what RevokeAccess
+// deletes.
 func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (registry.GrantResult, error) {
 	endpoint, region := d.cfg.Endpoint, d.cfg.Region
 	if endpoint == "" {
@@ -391,19 +500,57 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 		}
 	}
 	data := map[string][]byte{
-		"endpoint":        []byte(endpoint),
-		"bucket":          []byte(req.BucketyName),
-		"project":         []byte(d.cfg.Project),
-		"accessKeyID":     []byte(d.cfg.AccessKeyID),
-		"secretAccessKey": []byte(d.cfg.SecretAccessKey),
+		"endpoint": []byte(endpoint),
+		"bucket":   []byte(req.BucketyName),
+		"project":  []byte(d.cfg.Project),
+	}
+	// hmac=false opts this bucket's Secrets out of the static
+	// backend-wide pair - typically together with serviceAccount,
+	// whose blast-radius win the shared pair would otherwise
+	// undo, but a coordinates-only Secret is also legitimate for
+	// consumers with ambient credentials (Workload Identity). The
+	// DRIVER default stays true: the pair is the incumbent
+	// contract (family-portable S3-interop Secrets, minor-bump
+	// key stability); a backend imposes the opt-in posture by
+	// declaring hmac "false" in its parameter defaults.
+	includeHMAC := true
+	if v, ok := req.BucketyParameters["hmac"]; ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			includeHMAC = b
+		}
+	}
+	if includeHMAC {
+		data["accessKeyID"] = []byte(d.cfg.AccessKeyID)
+		data["secretAccessKey"] = []byte(d.cfg.SecretAccessKey)
 	}
 	if region != "" {
 		data["region"] = []byte(region)
 	}
+	principal, revocable := "gcs-static", false
+	if sa := req.BucketyParameters["serviceAccount"]; sa != "" {
+		if d.iamsvc == nil {
+			// Validation rejects the parameter on non-enabled
+			// backends; erroring rather than silently dropping the
+			// SA keys covers a backend whose config lost the block
+			// after resources adopted it.
+			return registry.GrantResult{}, fmt.Errorf("gcs: bucket %q declares parameters.serviceAccount but this backend has serviceAccounts disabled", req.BucketyName)
+		}
+		email := d.saEmail(sa)
+		keyJSON, keyID, err := d.ensureAccessKey(ctx, email, req.ExistingSecretData)
+		if err != nil {
+			return registry.GrantResult{}, err
+		}
+		data["serviceAccountKey"] = keyJSON
+		data["serviceAccountEmail"] = []byte(email)
+		data["serviceAccountKeyId"] = []byte(keyID)
+		principal = d.saResource(email) + "/keys/" + keyID
+		revocable = true
+	}
 	return registry.GrantResult{
 		SecretData: data,
-		Principal:  "gcs-static",
+		Principal:  principal,
 		Scoped:     false,
+		Revocable:  revocable,
 	}, nil
 }
 
@@ -423,9 +570,24 @@ func locationEndpoint(location string) (endpoint, region string) {
 	return globalEndpoint, ""
 }
 
-// RevokeAccess is a no-op in v0.1 (nothing to remove since there
-// is no per-access principal).
-func (d *Driver) RevokeAccess(_ context.Context, _ string) error { return nil }
+// RevokeAccess deletes the access's SA key when the principal is
+// one (full key resource name, stamped by GrantAccess). The
+// static-HMAC principal "gcs-static" has nothing backend-side to
+// remove. Idempotent on NotFound - which also covers the key
+// having gone with its already-deleted service account.
+func (d *Driver) RevokeAccess(ctx context.Context, principal string) error {
+	if !strings.Contains(principal, "/keys/") {
+		return nil
+	}
+	if d.iamsvc == nil {
+		return fmt.Errorf("gcs: principal %q is a service account key but this backend has serviceAccounts disabled; re-enable it in the backend config so the key can be revoked", principal)
+	}
+	_, err := d.iamsvc.Projects.ServiceAccounts.Keys.Delete(principal).Context(ctx).Do()
+	if err == nil || isNotFound(err) {
+		return nil
+	}
+	return fmt.Errorf("gcs: delete service account key %q: %w", principal, err)
+}
 
 // ValidateParameters accepts the driver-known keys. No internal
 // defaults per SPEC §Parameters: omitted keys leave the backend
@@ -454,16 +616,40 @@ func (d *Driver) ValidateParameters(params map[string]string) error {
 			if _, err := parseLabels(v); err != nil {
 				return fmt.Errorf("parameters.labels: %w", err)
 			}
+		case "serviceAccount":
+			if v == "" {
+				// Explicit opt-out: a CR clearing a backend
+				// parameter default. Valid regardless of the
+				// backend's serviceAccounts gate, since it asks for
+				// nothing.
+				continue
+			}
+			if d.cfg.ServiceAccounts == nil {
+				return fmt.Errorf("parameters.serviceAccount requires serviceAccounts to be enabled in this backend's config")
+			}
+			if !saNameRE.MatchString(v) {
+				return fmt.Errorf("parameters.serviceAccount %q must be a valid service account ID: 6-30 characters of lowercase letters, digits and hyphens, starting with a letter and ending alphanumeric (include the namespace, e.g. via the ${name}-${namespace} template, for project-wide uniqueness)", v)
+			}
+		case "hmac":
+			if _, err := strconv.ParseBool(v); err != nil {
+				return fmt.Errorf("parameters.%s: want \"true\" or \"false\", got %q", k, v)
+			}
 		default:
-			return fmt.Errorf("unknown parameter %q (gcs v0.1 accepts: location, uniformBucketLevelAccess, versioning, lifecycle, softDeleteRetentionSeconds, labels)", k)
+			return fmt.Errorf("unknown parameter %q (gcs v0.2 accepts: location, uniformBucketLevelAccess, versioning, lifecycle, softDeleteRetentionSeconds, labels, hmac, and serviceAccount when serviceAccounts=enabled)", k)
 		}
 	}
 	return nil
 }
 
-// ValidateUpdateParameters: location is set-at-create and
-// immutable; any change (including adding or removing the key) is
-// a rejection, because the backend cannot move a bucket in place.
+// ValidateUpdateParameters: location and serviceAccount are
+// set-at-create and immutable; any change (including adding or
+// removing the key) is a rejection. Location because the backend
+// cannot move a bucket in place; serviceAccount because scoping
+// out in-place transitions (SA rename orphaning bindings, add/
+// remove migrating live credentials under consumers) is what
+// keeps the feature's lifecycle tractable - recreate the Buckety
+// (retentionPolicy=Retain + adoption keeps the bucket) to change
+// it.
 func (d *Driver) ValidateUpdateParameters(oldParams, newParams map[string]string) error {
 	if err := d.ValidateParameters(newParams); err != nil {
 		return err
@@ -471,7 +657,27 @@ func (d *Driver) ValidateUpdateParameters(oldParams, newParams map[string]string
 	if o, n := oldParams["location"], newParams["location"]; o != n {
 		return fmt.Errorf("parameters.location is immutable post-create (current=%q, requested=%q)", o, n)
 	}
+	if o, n := oldParams["serviceAccount"], newParams["serviceAccount"]; o != n {
+		return fmt.Errorf("parameters.serviceAccount is immutable post-create (current=%q, requested=%q); recreate the Buckety with retentionPolicy=Retain + adoption to change it", o, n)
+	}
 	return nil
+}
+
+// TemplatedParameters declares serviceAccount template-resolved
+// (registry.TemplatedParameters), so the recommended uniqueness
+// convention is written once as a backend parameter default:
+//
+//	parameters:
+//	  serviceAccount: ${name}-${namespace}
+//
+// Declared only when the backend enables the feature, so a
+// serviceAccount default on a non-enabled backend fails startup
+// validation instead of deferring to per-resource errors.
+func (d *Driver) TemplatedParameters() []string {
+	if d.cfg.ServiceAccounts == nil {
+		return nil
+	}
+	return []string{"serviceAccount"}
 }
 
 func (d *Driver) ValidateAccessParameters(params map[string]string) error {

@@ -20,6 +20,19 @@ command -v jq      >/dev/null || { echo "jq not on PATH" >&2; exit 1; }
 command -v kustomize >/dev/null || { echo "kustomize not on PATH" >&2; exit 1; }
 
 cd "$REPO"
+
+# The digest is a function of the compiler, and CI rebuilds with
+# the go.mod toolchain directive (setup-go go-version-file). A bump
+# built with any other toolchain pins a digest CI cannot reproduce,
+# so drift fails here with the remedy instead of in the assertion.
+WANT="$(go mod edit -json | jq -r '.Toolchain // empty')"
+GOT="$(go env GOVERSION)"
+if [[ -z "$WANT" || "$GOT" != "$WANT" ]]; then
+  echo "local toolchain ${GOT} does not match the go.mod toolchain directive '${WANT:-<missing>}'" >&2
+  echo "align them first (go mod edit -toolchain=${GOT}) so CI reproduces the digest" >&2
+  exit 1
+fi
+
 TAG="$(date -u +%Y%m%dT%H%M%SZ)"
 
 rm -rf target/linux/amd64 oci

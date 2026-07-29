@@ -36,7 +36,7 @@
           "parameters": {
             "type": "object",
             "additionalProperties": { "type": "string" },
-            "description": "Cluster-operator-owned parameter defaults, merged under Buckety.spec.parameters (the CR wins per key). Lets driver-specific parameters stay out of portable CRs (SPEC: Driver families). Validated against the driver at startup."
+            "description": "Cluster-operator-owned parameter defaults, merged under Buckety.spec.parameters (the CR wins per key). Lets driver-specific parameters stay out of portable CRs (SPEC: Driver families). Validated against the driver at startup, except driver-declared templated keys (gcs serviceAccount), whose values may carry ${name}/${namespace}/${backend.X} references resolved per resource (SPEC: Naming templates > Parameter templates)."
           }
         }
       }

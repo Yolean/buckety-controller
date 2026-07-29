@@ -31,6 +31,17 @@
     "labels": {
       "type": "string",
       "description": "Bucket labels as a JSON object of string values, e.g. {\"site\": \"tenant1\", \"managed-by\": \"buckety\"}, for cost attribution and ownership. Listed labels are converged to their declared values; labels absent from the parameter are unmanaged and never deleted (same posture as unlisted parameters). Key/value charset rules are enforced by the backend."
+    },
+    "serviceAccount": {
+      "type": "string",
+      "anyOf": [{"const": ""}, {"minLength": 6, "maxLength": 30}],
+      "x-buckety-templated": true,
+      "description": "Opt-in per-bucket GCP service account, as the SA's short account ID: 6-30 characters of lowercase letters, digits and hyphens, starting with a letter and ending alphanumeric. Requires serviceAccounts enabled in the backend config. The driver maintains an SA of this name in the backend's identity project with roles/storage.objectAdmin on this bucket only, and each BucketyAccess Secret additionally carries serviceAccountKey (the SA key JSON for OAuth2 bearer-token auth), serviceAccountEmail and serviceAccountKeyId. Template-resolved with the restricted grammar (${name}, ${namespace}, ${backend.X} - no labels); include the namespace, e.g. ${name}-${namespace}, since SA IDs are unique per project. The empty string is an explicit per-CR opt-out of a backend parameter default. Set-at-create and immutable either way: recreate the Buckety (retentionPolicy=Retain + adoption keeps the bucket) to change it. NOTE a backend parameter default here applies to EXISTING Bucketys on the backend's next controller rollout - defaults merge on every reconcile and never re-pass admission, so audit resolved-name lengths fleet-wide before adding one."
+    },
+    "hmac": {
+      "type": "string",
+      "enum": ["true", "false"],
+      "description": "Whether access Secrets carry the backend's static S3-interop HMAC pair (accessKeyID/secretAccessKey). Omitted means \"true\" - the incumbent contract; gcs Secrets are S3-protocol portable by default and a minor driver bump must not remove keys. Declare \"false\" to mint Secrets without the backend-wide pair, typically together with serviceAccount so consumers hold ONLY the bucket-scoped identity; without serviceAccount the Secret carries bucket coordinates only, for consumers with ambient credentials. A backend can impose the opt-in posture fleet-wide by declaring \"false\" in its parameter defaults; CRs override per key. Mutable: flipping it rewrites Secrets in place on the next reconcile (file-mounted consumers pick it up, env-based ones need a restart)."
     }
   }
 }

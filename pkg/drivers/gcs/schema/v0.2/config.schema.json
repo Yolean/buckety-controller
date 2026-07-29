@@ -28,6 +28,27 @@
       "type": "string",
       "minLength": 1,
       "description": "Static HMAC secret copied into every access Secret. envsubst:\"true\" - supports ${VAR} interpolation at controller startup."
+    },
+    "serviceAccounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project"],
+      "description": "Opts this backend into per-bucket GCP service accounts (parameters.serviceAccount). Omitted (the default) rejects the parameter and keeps the controller free of IAM API calls and permissions. When set, the controller additionally needs roles/iam.serviceAccountAdmin and roles/iam.serviceAccountKeyAdmin on the serviceAccounts project, and storage.buckets.getIamPolicy/setIamPolicy on the bucket project.",
+      "properties": {
+        "project": {
+          "type": "string",
+          "minLength": 1,
+          "description": "GCP project the per-bucket service accounts are created in. STRONGLY RECOMMENDED to be a dedicated identity project, separate from the bucket project: creating a key on an SA equals impersonating it, so the controller's serviceAccountAdmin/serviceAccountKeyAdmin grants must be confined to a project whose only identities are the ones buckety mints. Cross-project bucket IAM bindings make the split free - SAs here bind onto buckets in the main project without the controller holding IAM-admin rights there."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Overrides the IAM API endpoint (full URL), e.g. for Private Service Connect. Authentication stays on unless insecure is also set. Unset reaches iam.googleapis.com with ADC."
+        },
+        "insecure": {
+          "type": "boolean",
+          "description": "Disables authentication towards endpoint - emulators and tests ONLY. A separate explicit flag so an endpoint typo cannot silently turn credentials off; requires endpoint."
+        }
+      }
     }
   }
 }

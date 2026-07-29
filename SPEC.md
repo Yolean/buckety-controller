@@ -346,6 +346,33 @@ so `${backend.zone}` must reflect whichever backend a given
 `Buckety` resolves to. Drivers do not inspect `defaults`; the
 templating layer above does.
 
+**Parameter templates.** A driver may additionally declare
+individual `spec.parameters` keys as template-resolved (the gcs
+driver declares `serviceAccount`). Declared keys resolve with a
+RESTRICTED grammar: `${name}`, `${namespace}` and `${backend.X}`
+only - no `${label[...]}`. The restriction is load-bearing:
+`spec.name` may reference mutable labels because its resolution
+freezes into `status.backendResourceName` at first reconcile,
+but parameters re-resolve on every pass, so every input must be
+immutable for the resolved value to be stable. Resolution runs
+in admission and in the reconciler on the merged
+defaults-under-CR view, which lets the cluster operator write a
+convention once as a backend parameter default
+(`serviceAccount: ${name}-${namespace}`) with tenants declaring
+nothing. A CR overrides a default per key, and for
+`serviceAccount` the empty string is the defined per-CR opt-out.
+Undeclared keys never resolve; `${...}` in their backend
+defaults stays a startup error.
+
+Be deliberate when ADDING a backend parameter default: defaults
+merge into EXISTING resources' effective view on the next
+reconcile after the controller rollout, without passing
+admission - there is no recreate gate on this route, and a
+default that resolves invalid for some existing resource (an
+over-long namespace against the SA ID's 30-character cap, say)
+freezes that resource's reconcile rather than failing its
+creation. Audit the fleet before adding one.
+
 ## Driver versioning
 
 Each driver carries a SemVer (`major.minor.patch`) advertised by
@@ -751,8 +778,12 @@ data:
   bucket:          <base64>    # tenant1-orders                (resource-type key)
   project:         <base64>    # the backend's GCP project
   region:          <base64>    # SigV4 signing region, derived with the endpoint (absent for multi-regions)
-  accessKeyID:     <base64>
+  accessKeyID:     <base64>    # static backend-wide HMAC pair; omitted when parameters.hmac="false"
   secretAccessKey: <base64>
+  # With parameters.serviceAccount (driver >= 0.2, backend opt-in):
+  serviceAccountKey:   <base64>    # SA key JSON (client_email, private_key, ...) for OAuth2 bearer-token auth
+  serviceAccountEmail: <base64>    # <shortname>@<identity-project>.iam.gserviceaccount.com
+  serviceAccountKeyId: <base64>    # private_key_id, for audit and rotation tooling
 ```
 
 Unlike the s3 driver, whose `endpoint` passes the configured URL
@@ -763,12 +794,74 @@ config can override both fields for emulators.
 
 The access keys are the backend's static HMAC pair (minted out of
 band via `gcloud storage hmac create`, copied identically to
-every `BucketyAccess`). Driver-minted per-access credentials are
-deliberately deferred to the v1alpha2 scoping design: GrantAccess
-runs on every reconcile and its result rewrites the Secret, and a
-GCS HMAC secret is only retrievable at creation, so per-access
-minting cannot be idempotent until grant-once semantics exist.
-Key names stay the same when scoped credentials land.
+every `BucketyAccess`). `parameters.hmac="false"` (driver >= 0.2,
+mutable, per CR or as a backend parameter default) omits the pair
+- typically together with `serviceAccount`, so consumers hold
+ONLY the bucket-scoped identity instead of having its
+blast-radius win undone by the backend-wide pair riding along;
+without `serviceAccount` it yields a coordinates-only Secret for
+ambient-credential consumers. The DRIVER default stays
+pair-included: it is the incumbent, family-portable contract, and
+a minor bump must not remove Secret keys - a backend chooses the
+opt-in posture by declaring `hmac: "false"` in its parameter
+defaults.
+
+**Per-bucket service accounts (gcs driver 0.2, opt-in).** A gcs
+backend that sets `serviceAccounts.project` in its config lets a
+`Buckety` declare `parameters.serviceAccount` (a template-resolved
+SA short name, immutable post-create). The driver then maintains a
+GCP service account with `roles/storage.objectAdmin` on that
+bucket only, and each `BucketyAccess` Secret additionally carries
+one user-managed key for it — native GCS auth with bucket-scoped
+blast radius, alongside the (still backend-wide) HMAC pair. The
+create-only-retrievable-key problem that deferred per-access
+minting is solved by `GrantRequest.ExistingSecretData`: GrantAccess
+returns the Secret's current key unchanged while it still verifies
+against `keys.list`, and mints only when the key is absent, revoked
+out of band, or expired — which makes server-side key deletion the
+manual rotation runbook. `status.principal` is the key's full
+resource name and `RevokeAccess` deletes it, so BucketyAccess
+deletion performs real revocation for these Secrets.
+
+The `serviceAccounts.project` SHOULD be a dedicated identity
+project, separate from the bucket project: key creation equals
+impersonation, and the project boundary is what confines the
+controller's `roles/iam.serviceAccountAdmin` +
+`roles/iam.serviceAccountKeyAdmin` grants to identities that exist
+only to hold buckety-granted bucket bindings (the bucket project
+additionally needs `storage.buckets.getIamPolicy/setIamPolicy`).
+Ownership is stamped as JSON into each SA's description and
+verified before every bind/mint/delete, so a tenant naming a
+foreign SA in `parameters.serviceAccount` is refused rather than
+handed its keys. (The marker is trusted as written: anyone
+holding serviceAccountAdmin on the identity project can rewrite
+descriptions, which is one more reason that project must be
+dedicated to buckety-minted identities.) Role scoping is still
+NOT implemented: all accesses share the bucket-scoped SA
+regardless of role, and `ScopingNotImplemented` continues to
+surface for non-ReadWrite roles. Scheduled key rotation is
+deliberately deferred (see Non-goals); the reuse check plus
+one-key-per-access keeps within GCP's 10-user-managed-keys-per-SA
+limit, bounding a bucket at ~10 CONCURRENT accesses until
+rotation lands - not cumulative lifecycle churn, because
+credentials never outlive their access (next paragraph).
+
+**Retention semantics.** `retentionPolicy=Retain` retains the
+backend data unit - the bucket, its IAM policy, and its (by then
+keyless) service account - and NEVER credentials: keys are
+revoked with each `BucketyAccess` under every policy, replaced
+keys are revoked as soon as their successor is written, and the
+implicit access is revoked before the `Buckety` itself lets go.
+Keeping the SA is deliberate: the retained bucket's policy still
+references it (deleting it would leave a dangling
+`deleted:serviceAccount:` binding), and recreate-with-adoption -
+the flow Retain exists for - finds a marker-matching keyless SA
+instead of hitting GCP's 30-day tombstone on the reserved name.
+Permanent teardowns that must reclaim SA quota delete the SA out
+of band; the ownership marker identifies buckety's. If a leak
+ever wedges an SA at the key cap, surplus `USER_MANAGED` keys on
+a marker-verified SA are safe to delete server-side and the fleet
+re-mints within one reconcile.
 
 ## Adoption
 
@@ -836,7 +929,12 @@ deletion more conservative.
 
 - Both kinds carry a finalizer `buckety.yolean.se/cleanup`.
 - `BucketyAccess` deletion blocks on `RevokeAccess` succeeding
-  (in v1alpha1 the no-op revoke completes immediately).
+  (in v1alpha1 the no-op revoke completes immediately). When the
+  backend is missing from config, deletion blocks only for
+  principals the driver stamped revocable
+  (`status.principalRevocable`, from `GrantResult.Revocable` -
+  gcs SA keys); static shared principals release as before, so
+  backend renames do not wedge access teardown.
 - `Buckety` deletion blocks on (a) all referencing
   `BucketyAccess` being gone — controller does NOT cascade-delete
   them; it surfaces a `BlockedByAccesses` condition with the
@@ -1034,7 +1132,7 @@ Required CI matrix for v1alpha1:
 | --- | --- |
 | `kadm` | redpanda |
 | `s3`   | versitygw, minio |
-| `gcs`  | fakegcs (fake-gcs-server; covers the JSON-API control plane — real-GCS-only behaviours like HMAC auth enforcement and the 90-day UBLA disable window are documented, not e2e-gated) |
+| `gcs`  | fakegcs (fake-gcs-server; covers the JSON-API control plane — real-GCS-only behaviours like HMAC auth enforcement, the 90-day UBLA disable window and the serviceAccounts IAM surface (no iam.googleapis.com or bucket-IAM emulation; unit-tested against an httptest fake instead) are documented, not e2e-gated) |
 
 Adding an implementation later (e.g. AWS S3 once the project has
 credentials and a budget) requires no example or harness changes,
@@ -1071,7 +1169,11 @@ and the corresponding GHA secret.
 - MySQL driver.
 - Per-consumer credential scoping (SASL/SCRAM for kafka, IAM
   users for S3). All `BucketyAccess` instances for the same
-  `Buckety` receive identical credentials.
+  `Buckety` receive identical credentials. Partial exception
+  since gcs driver 0.2: opt-in per-BUCKET service accounts give
+  each access its own key for a bucket-scoped identity (see
+  Secret output > gcs driver), but role scoping remains
+  unimplemented.
 - Cross-namespace `bucketyRef`.
 - Adopting backing resources that already exist outside Buckety.
 - Quota enforcement.
@@ -1079,7 +1181,13 @@ and the corresponding GHA secret.
   startup-only; rotating credentials requires re-rolling the
   controller Pod).
 - Runtime credential rotation in issued Secrets without
-  `BucketyAccess` recreate.
+  `BucketyAccess` recreate. Deferred by intent, not omission:
+  for gcs per-bucket service accounts the reuse-or-mint grant
+  machinery is already rotation-shaped, and scheduled key
+  rotation (mint new, overlap one period, garbage-collect the
+  previous key) is the planned follow-up; until then rotation is
+  operator-driven - delete the key server-side and the next
+  reconcile re-mints (`gcloud iam service-accounts keys delete`).
 - Multi-cluster federation.
 - Admission webhook for cross-resource invariants. Per-resource
   parameter validation (against per-driver schemas) and

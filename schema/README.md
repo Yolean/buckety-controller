@@ -37,6 +37,7 @@ v0.1.1; the v0.1.0 tag predates this directory), or track `main`.
 
 Generated - do not edit by hand. Source of truth is the CRD
 yamls (CR shape) plus
-`pkg/drivers/<driver-or-family>/schema/v0.1/parameters.schema.json`
-(parameters). Regenerate with `go run ./scripts/gen-cr-schemas`;
+`pkg/drivers/<driver-or-family>/schema/<major.minor>/parameters.schema.json`
+(parameters; the generator pins each driver's current schema
+version). Regenerate with `go run ./scripts/gen-cr-schemas`;
 CI fails if the output is not committed.

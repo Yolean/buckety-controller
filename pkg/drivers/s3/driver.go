@@ -202,7 +202,8 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 // versioned buckets); ErrDeletionInProgress tells the controller
 // to requeue promptly. A bucket under sustained concurrent writes
 // is chased rather than declared failed.
-func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
+func (d *Driver) DeleteBuckety(ctx context.Context, req registry.DeleteRequest) error {
+	name := req.Name
 	deleted, err := d.emptyBucketSlice(ctx, name)
 	if err != nil {
 		if isNotFound(err) {

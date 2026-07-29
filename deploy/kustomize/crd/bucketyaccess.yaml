@@ -91,6 +91,14 @@ spec:
                   Backend-side identity granted access. In v1alpha1
                   with no per-consumer scoping this is typically
                   the backend's root principal.
+              principalRevocable:
+                type: boolean
+                description: |
+                  Whether principal names a credential the driver
+                  minted for this access and must revoke
+                  backend-side (a gcs SA key). Deletion with the
+                  backend missing from config blocks only for
+                  revocable principals.
               conditions:
                 type: array
                 items:

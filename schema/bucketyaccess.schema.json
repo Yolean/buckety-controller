@@ -133,6 +133,10 @@
         "principal": {
           "description": "Backend-side identity granted access. In v1alpha1\nwith no per-consumer scoping this is typically\nthe backend's root principal.\n",
           "type": "string"
+        },
+        "principalRevocable": {
+          "description": "Whether principal names a credential the driver\nminted for this access and must revoke\nbackend-side (a gcs SA key). Deletion with the\nbackend missing from config blocks only for\nrevocable principals.\n",
+          "type": "boolean"
         }
       },
       "type": "object"
