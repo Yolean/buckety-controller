@@ -87,6 +87,16 @@ func (v *Validator) validateBuckety(_ context.Context, req admission.Request) ad
 		}
 	}
 
+	// Merged + resolved views (config.Backend.ResolvedParameters):
+	// driver-declared templated keys resolve against immutable
+	// inputs only (name/namespace/backend defaults), so admission
+	// and the reconciler agree on the resolved value and label
+	// mutations cannot change it.
+	params, err := backend.ResolvedParameters(bky.Name, bky.Namespace, bky.Spec.Parameters)
+	if err != nil {
+		return admission.Denied(fmt.Sprintf("spec.parameters: %v", err))
+	}
+
 	if req.Operation == admissionv1.Update && len(req.OldObject.Raw) > 0 {
 		var old bucketyv1.Buckety
 		if err := json.Unmarshal(req.OldObject.Raw, &old); err != nil {
@@ -95,12 +105,18 @@ func (v *Validator) validateBuckety(_ context.Context, req admission.Request) ad
 		// Merged views on both sides: dropping a CR key that a
 		// backend default also defines falls back to the default
 		// value, and that transition must pass immutability too.
-		if err := backend.Driver.ValidateUpdateParameters(
-			backend.EffectiveParameters(old.Spec.Parameters),
-			backend.EffectiveParameters(bky.Spec.Parameters)); err != nil {
+		oldParams, err := backend.ResolvedParameters(old.Name, old.Namespace, old.Spec.Parameters)
+		if err != nil {
+			// The stored object no longer resolves (a backend
+			// default it references was removed); comparing against
+			// the raw view still enforces immutability of the
+			// literal values without dead-ending every update.
+			oldParams = backend.EffectiveParameters(old.Spec.Parameters)
+		}
+		if err := backend.Driver.ValidateUpdateParameters(oldParams, params); err != nil {
 			return admission.Denied(fmt.Sprintf("spec.parameters: %v", err))
 		}
-	} else if err := backend.Driver.ValidateParameters(backend.EffectiveParameters(bky.Spec.Parameters)); err != nil {
+	} else if err := backend.Driver.ValidateParameters(params); err != nil {
 		return admission.Denied(fmt.Sprintf("spec.parameters: %v", err))
 	}
 

@@ -48,7 +48,7 @@ func main() {
 		// etc), while the family package keeps the SPEC term.
 		{"blobstore", "pkg/drivers/objectstore/schema/v0.1/parameters.schema.json",
 			"Standalone editor schema for a Buckety carrying only object-store family-common parameters, provisionable on any bucket backend (gcs, s3) - see SPEC.md \"Driver families\". SPECIALIZE to buckety-gcs or buckety-s3 for driver-specific parameters; GENERALIZE to buckety for no parameter constraints."},
-		{"gcs", "pkg/drivers/gcs/schema/v0.1/parameters.schema.json",
+		{"gcs", "pkg/drivers/gcs/schema/v0.2/parameters.schema.json",
 			"Standalone editor schema for a Buckety whose backend resolves to the gcs driver. GENERALIZE to buckety-blobstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints."},
 		{"s3", "pkg/drivers/s3/schema/v0.1/parameters.schema.json",
 			"Standalone editor schema for a Buckety whose backend resolves to the s3 driver. GENERALIZE to buckety-blobstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints."},

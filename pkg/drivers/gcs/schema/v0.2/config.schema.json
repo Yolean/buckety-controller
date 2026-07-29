@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gcs driver backend config",
+  "description": "Schema for the config: block under a backend entry whose driver is gcs. Control plane authenticates via Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS on the controller Deployment; STORAGE_EMULATOR_HOST is honoured for emulators); the credential fields here are the S3-interop data-plane pair written to access Secrets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "accessKeyID", "secretAccessKey"],
+  "properties": {
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GCP project ID buckets are created in. Also written to access Secrets under the project key."
+    },
+    "endpoint": {
+      "type": "string",
+      "description": "Overrides the S3-interop endpoint written to access Secrets, as a BARE host without scheme (consumers choose the scheme; a scheme here is a startup error). Normally unset: the driver derives the endpoint per bucket from its location - storage.<region>.rep.googleapis.com for regional buckets (in-region data path), storage.googleapis.com for multi-regions. Set for emulators (fake-gcs-server) so consumers reach the same endpoint the controller provisions against; the control plane itself follows ADC/STORAGE_EMULATOR_HOST, not this field."
+    },
+    "region": {
+      "type": "string",
+      "description": "Overrides the SigV4 signing region written to access Secrets under the region key. Normally unset: derived per bucket from its location alongside the endpoint (lowercased region for regional buckets; omitted for multi-regions)."
+    },
+    "accessKeyID": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Static HMAC access key ID copied into every access Secret. Mint out of band for a service account with access to this backend's buckets: gcloud storage hmac create <sa-email>. The service account's grant defines what every access can do; data planes that clean up after themselves (e.g. staged-write archival) need roles/storage.objectAdmin (get/create/delete), not just read+create. envsubst:\"true\" - supports ${VAR} interpolation at controller startup."
+    },
+    "secretAccessKey": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Static HMAC secret copied into every access Secret. envsubst:\"true\" - supports ${VAR} interpolation at controller startup."
+    },
+    "serviceAccounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project"],
+      "description": "Opts this backend into per-bucket GCP service accounts (parameters.serviceAccount). Omitted (the default) rejects the parameter and keeps the controller free of IAM API calls and permissions. When set, the controller additionally needs roles/iam.serviceAccountAdmin and roles/iam.serviceAccountKeyAdmin on the serviceAccounts project, and storage.buckets.getIamPolicy/setIamPolicy on the bucket project.",
+      "properties": {
+        "project": {
+          "type": "string",
+          "minLength": 1,
+          "description": "GCP project the per-bucket service accounts are created in. STRONGLY RECOMMENDED to be a dedicated identity project, separate from the bucket project: creating a key on an SA equals impersonating it, so the controller's serviceAccountAdmin/serviceAccountKeyAdmin grants must be confined to a project whose only identities are the ones buckety mints. Cross-project bucket IAM bindings make the split free - SAs here bind onto buckets in the main project without the controller holding IAM-admin rights there."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Overrides the IAM API endpoint (full URL) for emulators and tests; setting it disables authentication. Unset reaches iam.googleapis.com with ADC."
+        }
+      }
+    }
+  }
+}

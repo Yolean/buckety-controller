@@ -58,7 +58,7 @@ type Driver interface {
 	// data plane placed on individual items (object holds,
 	// retention) are honoured, not fought: deletion blocks with an
 	// error naming the protected items until they are released.
-	DeleteBuckety(ctx context.Context, name string) error
+	DeleteBuckety(ctx context.Context, req DeleteRequest) error
 
 	// GrantAccess returns the Secret payload to mint for a
 	// BucketyAccess. v1alpha1 drivers may return the backend's
@@ -114,8 +114,22 @@ type EnsureRequest struct {
 	// name, S3 bucket name, ...). Pinned in
 	// status.backendResourceName.
 	Name string
-	// Parameters is spec.parameters with no controller-side
-	// transformation.
+	// Parameters is the effective parameter view (backend defaults
+	// merged under spec.parameters, declared templated keys
+	// resolved).
+	Parameters map[string]string
+}
+
+// DeleteRequest carries what DeleteBuckety needs to tear down the
+// backend resource and any per-resource principals the driver
+// provisioned for it.
+type DeleteRequest struct {
+	// Name is the resolved backend resource name, from
+	// status.backendResourceName.
+	Name string
+	// Parameters is the same effective view EnsureBuckety received;
+	// drivers that provisioned per-resource principals from
+	// parameters (gcs serviceAccount) find them here at teardown.
 	Parameters map[string]string
 }
 
@@ -129,6 +143,22 @@ type GrantRequest struct {
 	Role string
 	// Parameters is BucketyAccess.spec.parameters.
 	Parameters map[string]string
+	// BucketyParameters is the referenced Buckety's effective
+	// parameter view, identical to what EnsureBuckety received.
+	// Drivers that mint per-resource principals read their knobs
+	// from here (gcs serviceAccount); drivers without such
+	// parameters ignore it.
+	BucketyParameters map[string]string
+	// ExistingSecretData is the current content of the access's
+	// credentials Secret, nil when it does not exist yet. This is
+	// what makes minting idempotent for credentials that are only
+	// retrievable at creation (GCS SA keys, HMAC secrets):
+	// GrantAccess runs on every reconcile and its result rewrites
+	// the Secret, so such a driver MUST return the existing data
+	// unchanged while it still verifies against the backend, and
+	// mint only when it is absent or invalid (which doubles as
+	// self-healing after out-of-band revocation).
+	ExistingSecretData map[string][]byte
 }
 
 // GrantResult is what the driver hands back for a BucketyAccess.
@@ -154,6 +184,21 @@ type GrantResult struct {
 // json.RawMessage so each driver decodes strictly with its own
 // types.
 type Factory func(rawConfig json.RawMessage) (Driver, error)
+
+// TemplatedParameters returns the Buckety parameter keys the
+// driver declares as template-resolved, or nil for drivers
+// without the optional capability. Declared keys' values are run
+// through the restricted parameter-template grammar
+// (template.ResolveParameters) by the controller and webhook
+// before validation and before every driver call; backend
+// parameter defaults for declared keys skip driver validation at
+// startup, since they only resolve per resource.
+func TemplatedParameters(d Driver) []string {
+	if t, ok := d.(interface{ TemplatedParameters() []string }); ok {
+		return t.TemplatedParameters()
+	}
+	return nil
+}
 
 // ErrParameterDrift is the typed error EnsureBuckety returns when
 // it observes drift on the backend it cannot reconcile in place

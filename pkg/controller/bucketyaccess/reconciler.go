@@ -214,17 +214,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
 	}
 
-	res, err := backend.Driver.GrantAccess(ctx, registry.GrantRequest{
-		BucketyName: bky.Status.BackendResourceName,
-		Role:        string(access.Spec.Role),
-		Parameters:  access.Spec.Parameters,
-	})
+	// The Buckety's resolved parameter view rides along on the
+	// grant so drivers can find per-resource principals (gcs
+	// serviceAccount) without knowing about CRDs.
+	bkyParams, err := backend.ResolvedParameters(bky.Name, bky.Namespace, bky.Spec.Parameters)
 	if err != nil {
 		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed",
 			corev1.EventTypeWarning, "GrantFailed", err.Error())
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed", err.Error(), access.Generation)
-		_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
 	}
 
 	// Refuse to touch a Secret this BucketyAccess does not control:
@@ -234,6 +232,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// the conflict clears on a later requeue once the old Secret is
 	// gone. Live read, not cache: foreign Secrets carry no
 	// LabelOwnedSecret and are invisible to the scoped informer.
+	//
+	// The gate runs BEFORE GrantAccess: drivers may mint live
+	// credentials there (a GCS SA key), and minting for a Secret we
+	// then refuse to write would leak an unrecorded credential. The
+	// read also feeds ExistingSecretData, which is what lets such
+	// drivers return the already-minted credential unchanged
+	// instead of minting on every reconcile.
 	var existing corev1.Secret
 	getErr := r.liveReader().Get(ctx, types.NamespacedName{Namespace: access.Namespace, Name: access.Spec.CredentialsSecretName}, &existing)
 	switch {
@@ -252,6 +257,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	case getErr != nil && !apierrors.IsNotFound(getErr):
 		return ctrl.Result{}, getErr
+	}
+	var existingData map[string][]byte
+	if getErr == nil {
+		existingData = existing.Data
+	}
+
+	res, err := backend.Driver.GrantAccess(ctx, registry.GrantRequest{
+		BucketyName:        bky.Status.BackendResourceName,
+		Role:               string(access.Spec.Role),
+		Parameters:         access.Spec.Parameters,
+		BucketyParameters:  bkyParams,
+		ExistingSecretData: existingData,
+	})
+	if err != nil {
+		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed",
+			corev1.EventTypeWarning, "GrantFailed", err.Error())
+		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed", err.Error(), access.Generation)
+		_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+		return ctrl.Result{}, err
 	}
 
 	// Mint/update the Secret with this BucketyAccess as owner.

@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-gcs.schema.json
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: orders
+spec:
+  backend: gcs
+  retentionPolicy: Delete
+  parameters:
+    uniformBucketLevelAccess: "true"
+    # Per-bucket GCP service account (backend must enable
+    # serviceAccounts in its config). Template-resolved; the
+    # -${namespace} suffix is the uniqueness convention since SA
+    # IDs are unique per project. Alternatively the cluster
+    # operator declares this once as a backend parameter default
+    # and CRs omit it entirely. Immutable post-create.
+    serviceAccount: ${name}-${namespace}
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: orders-bucket

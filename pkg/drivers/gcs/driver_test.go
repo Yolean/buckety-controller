@@ -433,7 +433,7 @@ func keysOf(m map[string][]byte) []string {
 // whole-CR schemas (schema/) compose from this file, so this is
 // also their sync guard.
 func TestParametersSchemaInSync(t *testing.T) {
-	props := schemaProperties(t, "schema/v0.1/parameters.schema.json")
+	props := schemaProperties(t, "schema/v0.2/parameters.schema.json")
 	d := &Driver{cfg: &Config{Project: "p"}}
 
 	// Every schema property must be a code-known key: probing with

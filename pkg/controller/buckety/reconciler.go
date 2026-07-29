@@ -227,10 +227,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// (docs/SCAFFOLDING.md "Webhook TLS"); this is the promised
 	// fallback that surfaces invalid parameters on status instead of
 	// letting them travel to the backend as an opaque driver error.
-	// Validation and Ensure both operate on the merged view of
-	// backend parameter defaults + CR parameters (CR wins per key,
-	// see config.Backend.EffectiveParameters).
-	effective := backend.EffectiveParameters(bky.Spec.Parameters)
+	// Validation and Ensure both operate on the merged + resolved
+	// view of backend parameter defaults + CR parameters (CR wins
+	// per key, driver-declared templated keys resolved; see
+	// config.Backend.ResolvedParameters).
+	effective, perr := backend.ResolvedParameters(bky.Name, bky.Namespace, bky.Spec.Parameters)
+	if perr != nil {
+		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate",
+			corev1.EventTypeWarning, "ParameterTemplate", perr.Error())
+		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate", perr.Error(), bky.Generation)
+		setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "ParameterTemplate", "spec change required", bky.Generation)
+		return ctrl.Result{}, r.Status().Patch(ctx, &bky, client.MergeFrom(baseBky))
+	}
 	if err := backend.Driver.ValidateParameters(effective); err != nil {
 		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters",
 			corev1.EventTypeWarning, "InvalidParameters", err.Error())
@@ -359,7 +367,24 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 			}
 			return ctrl.Result{}, nil
 		}
-		if err := backend.Driver.DeleteBuckety(ctx, bky.Status.BackendResourceName); err != nil {
+		// The same resolved parameter view Ensure operated on, so
+		// the driver can find per-resource principals (gcs
+		// serviceAccount) at teardown. Resolution is deterministic
+		// (name/namespace/backend defaults only), so a failure here
+		// means the backend config changed underneath the resource;
+		// deletion blocks rather than orphaning the principal.
+		effective, perr := backend.ResolvedParameters(bky.Name, bky.Namespace, bky.Spec.Parameters)
+		if perr != nil {
+			r.eventIfTransition(bky, base.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate",
+				corev1.EventTypeWarning, "DeleteFailed", perr.Error())
+			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate", perr.Error(), bky.Generation)
+			_ = r.Status().Patch(ctx, bky, client.MergeFrom(base))
+			return ctrl.Result{}, perr
+		}
+		if err := backend.Driver.DeleteBuckety(ctx, registry.DeleteRequest{
+			Name:       bky.Status.BackendResourceName,
+			Parameters: effective,
+		}); err != nil {
 			if registry.IsDeletionInProgress(err) {
 				// Recursive contents deletion runs in bounded
 				// slices; this is progress, not failure. The

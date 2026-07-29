@@ -100,6 +100,13 @@
               "minLength": 1,
               "type": "string"
             },
+            "serviceAccount": {
+              "description": "Opt-in per-bucket GCP service account, as the SA's short account ID: 6-30 characters of lowercase letters, digits and hyphens, starting with a letter and ending alphanumeric. Requires serviceAccounts enabled in the backend config. The driver maintains an SA of this name in the backend's identity project with roles/storage.objectAdmin on this bucket only, and each BucketyAccess Secret additionally carries serviceAccountKey (the SA key JSON for OAuth2 bearer-token auth), serviceAccountEmail and serviceAccountKeyId. Template-resolved with the restricted grammar (${name}, ${namespace}, ${backend.X} - no labels); include the namespace, e.g. ${name}-${namespace}, since SA IDs are unique per project. Set-at-create and immutable: recreate the Buckety (retentionPolicy=Retain + adoption keeps the bucket) to change it.",
+              "maxLength": 30,
+              "minLength": 6,
+              "type": "string",
+              "x-buckety-templated": true
+            },
             "softDeleteRetentionSeconds": {
               "description": "Soft delete window (softDeletePolicy.retentionDurationSeconds): how long deleted or overwritten objects remain restorable. \"0\" disables; GCS accepts enabled windows of 604800 to 7776000 seconds (7 to 90 days) only. Note GCS defaults NEW buckets to 7 days on - declare \"0\" to opt out, or a value to pin it against console drift. Mutable; reconciled in place. Cheap insurance against mass-delete with a compromised data-plane key, at the cost of also retaining intentionally lifecycle-deleted objects for the window.",
               "type": "string"

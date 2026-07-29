@@ -10,9 +10,13 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
+	"github.com/Yolean/buckety-controller/pkg/template"
 	yclconfig "github.com/Yolean/y-cluster/pkg/configfile"
+	yaml "sigs.k8s.io/yaml"
 )
 
 // Filename is the conventional name inside the directory passed
@@ -35,7 +39,15 @@ type rawBackend struct {
 	// driver-specific knobs out of portable CRs (issue #17): a
 	// gcs backend declares location/uniformBucketLevelAccess here
 	// while the CR carries only family-common parameters.
-	Parameters map[string]string `json:"parameters,omitempty"`
+	//
+	// RawMessage, not map[string]string, for the same reason as
+	// Config: the loader's envsubst policy scan rejects ${...} in
+	// untagged strings, and defaults for driver-declared templated
+	// keys legitimately carry naming-template references
+	// (serviceAccount: ${name}-${namespace}) that resolve per
+	// resource, not against the environment. Load decodes and
+	// re-imposes the no-${...} policy on every OTHER key.
+	Parameters json.RawMessage `json:"parameters,omitempty"`
 }
 
 // Backend is a resolved backend after driver factory invocation.
@@ -64,6 +76,25 @@ func (b Backend) EffectiveParameters(crParams map[string]string) map[string]stri
 		out[k] = v
 	}
 	return out
+}
+
+// ResolvedParameters is EffectiveParameters followed by template
+// resolution of the keys the driver declares templated, against
+// the Buckety's metadata.name/namespace and this backend's
+// defaults map. This is THE parameter view every driver call and
+// validation operates on; reconcilers and the webhook must not
+// hand-roll the resolution or they diverge on which keys resolve.
+func (b Backend) ResolvedParameters(bkyName, bkyNamespace string, crParams map[string]string) (map[string]string, error) {
+	effective := b.EffectiveParameters(crParams)
+	keys := registry.TemplatedParameters(b.Driver)
+	if len(keys) == 0 {
+		return effective, nil
+	}
+	return template.ResolveParameters(effective, keys, template.Inputs{
+		Name:            bkyName,
+		Namespace:       bkyNamespace,
+		BackendDefaults: b.Defaults,
+	})
 }
 
 // Loaded is the result of a successful Load.
@@ -100,20 +131,71 @@ func Load(dir string) (*Loaded, error) {
 		if err != nil {
 			return nil, fmt.Errorf("backends[%d] %q: %w", i, b.Name, err)
 		}
+		var parameters map[string]string
+		if len(b.Parameters) > 0 {
+			if err := yaml.UnmarshalStrict(b.Parameters, &parameters); err != nil {
+				return nil, fmt.Errorf("backends[%d] %q: parameters: %w", i, b.Name, err)
+			}
+		}
 		// Backend parameter defaults are validated at startup so a
 		// typo crash-loops with a config diagnostic instead of
-		// failing every resource at admission.
-		if err := drv.ValidateParameters(b.Parameters); err != nil {
+		// failing every resource at admission. Defaults for
+		// driver-declared templated keys carry unresolved templates
+		// (they resolve per resource), so those skip driver value
+		// validation here and get a template syntax check instead;
+		// every other key re-imposes the loader's envsubst policy
+		// that the RawMessage detour bypassed (see rawBackend).
+		params := parameters
+		tkeys := registry.TemplatedParameters(drv)
+		if len(params) > 0 {
+			for k, v := range params {
+				if !slices.Contains(tkeys, k) && strings.Contains(v, "${") {
+					return nil, fmt.Errorf("backends[%d] %q: parameters.%s: ${...} references are not supported here (driver %q does not declare %q as a templated parameter)", i, b.Name, k, b.Driver, k)
+				}
+			}
+			if len(tkeys) > 0 {
+				if _, err := template.ResolveParameters(params, tkeys, template.Inputs{
+					Name: "startup-check", Namespace: "startup-check", BackendDefaults: b.Defaults,
+				}); err != nil {
+					return nil, fmt.Errorf("backends[%d] %q: parameters: %w", i, b.Name, err)
+				}
+				params = withoutKeys(params, tkeys)
+			}
+		}
+		if err := drv.ValidateParameters(params); err != nil {
 			return nil, fmt.Errorf("backends[%d] %q: parameters: %w", i, b.Name, err)
 		}
 		out.Backends[b.Name] = Backend{
 			Name:       b.Name,
 			Driver:     drv,
 			Defaults:   b.Defaults,
-			Parameters: b.Parameters,
+			Parameters: parameters,
 		}
 	}
 	return out, nil
+}
+
+// withoutKeys returns params minus the listed keys, copying only
+// when something is actually dropped.
+func withoutKeys(params map[string]string, keys []string) map[string]string {
+	drop := false
+	for _, k := range keys {
+		if _, ok := params[k]; ok {
+			drop = true
+			break
+		}
+	}
+	if !drop {
+		return params
+	}
+	out := make(map[string]string, len(params))
+	for k, v := range params {
+		out[k] = v
+	}
+	for _, k := range keys {
+		delete(out, k)
+	}
+	return out
 }
 
 func validateOuter(c *rawConfig) error {

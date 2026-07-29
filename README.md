@@ -61,7 +61,7 @@ v1alpha1. Three drivers shipped:
 | --- | --- | --- |
 | `kadm` | Kafka-protocol brokers (Redpanda, Apache Kafka, Confluent) | Topic create/alter/delete. v1alpha1: no per-consumer SASL/SCRAM scoping. |
 | `s3` | S3-compatible (VersityGW, MinIO, AWS S3, Cloudflare R2, Hetzner, GCS interop) | Bucket create/delete. v1alpha1: all consumers receive the backend's root keys. |
-| `gcs` | Google Cloud Storage via the native JSON API | Bucket create/update/delete with location, uniform bucket-level access, versioning and lifecycle parameters. Access Secrets carry a static HMAC pair (S3-protocol data path); all consumers receive the same pair. |
+| `gcs` | Google Cloud Storage via the native JSON API | Bucket create/update/delete with location, uniform bucket-level access, versioning and lifecycle parameters. Access Secrets carry a static HMAC pair (S3-protocol data path); all consumers receive the same pair. Driver 0.2 adds opt-in per-bucket service accounts (`parameters.serviceAccount`): a bucket-scoped GCP SA whose key JSON lands in each access Secret for OAuth2 bearer-token auth (`examples/gcs/service-account/`). |
 
 e2e coverage in CI runs against Redpanda (`kadm`), VersityGW +
 MinIO (`s3`) and fake-gcs-server (`gcs`). The other listed S3
@@ -69,7 +69,8 @@ backends share the same client library and the same e2e shape; if
 you hit a compatibility issue with one of them, please file an
 issue. For `gcs`, behaviours the emulator cannot exercise (HMAC
 auth enforcement, the 90-day window for disabling uniform
-bucket-level access) are documented rather than e2e-gated.
+bucket-level access, the per-bucket serviceAccounts IAM surface)
+are documented rather than e2e-gated.
 
 Use `gcs` (not `s3` interop) when the controller should provision
 GCS buckets: creation needs the project, and location / uniform
@@ -192,6 +193,13 @@ backends:
     # mint out of band with: gcloud storage hmac create <sa-email>
     accessKeyID:     ${GCS_HMAC_ACCESS_ID}
     secretAccessKey: ${GCS_HMAC_SECRET}
+    # Optional: per-bucket service accounts (parameters.serviceAccount).
+    # Use a DEDICATED identity project - key creation equals
+    # impersonation, so the controller's SA-admin grants must not
+    # extend to projects with unrelated identities. See
+    # examples/gcs/service-account/ for required grants.
+    # serviceAccounts:
+    #   project: my-buckety-identities
 ```
 
 Access Secrets carry the S3-interop `endpoint` (a bare host - the

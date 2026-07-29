@@ -130,7 +130,8 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 }
 
 // DeleteBuckety removes the topic. Idempotent on NotFound.
-func (d *Driver) DeleteBuckety(ctx context.Context, name string) error {
+func (d *Driver) DeleteBuckety(ctx context.Context, req registry.DeleteRequest) error {
+	name := req.Name
 	resp, err := d.aclient.DeleteTopics(ctx, name)
 	if err != nil {
 		return fmt.Errorf("kadm: delete topic %q: %w", name, err)
