@@ -359,8 +359,19 @@ in admission and in the reconciler on the merged
 defaults-under-CR view, which lets the cluster operator write a
 convention once as a backend parameter default
 (`serviceAccount: ${name}-${namespace}`) with tenants declaring
-nothing. Undeclared keys never resolve; `${...}` in their
-backend defaults stays a startup error.
+nothing. A CR overrides a default per key, and for
+`serviceAccount` the empty string is the defined per-CR opt-out.
+Undeclared keys never resolve; `${...}` in their backend
+defaults stays a startup error.
+
+Be deliberate when ADDING a backend parameter default: defaults
+merge into EXISTING resources' effective view on the next
+reconcile after the controller rollout, without passing
+admission - there is no recreate gate on this route, and a
+default that resolves invalid for some existing resource (an
+over-long namespace against the SA ID's 30-character cap, say)
+freezes that resource's reconcile rather than failing its
+creation. Audit the fleet before adding one.
 
 ## Driver versioning
 
@@ -767,7 +778,7 @@ data:
   bucket:          <base64>    # tenant1-orders                (resource-type key)
   project:         <base64>    # the backend's GCP project
   region:          <base64>    # SigV4 signing region, derived with the endpoint (absent for multi-regions)
-  accessKeyID:     <base64>
+  accessKeyID:     <base64>    # static backend-wide HMAC pair; omitted when parameters.hmac="false"
   secretAccessKey: <base64>
   # With parameters.serviceAccount (driver >= 0.2, backend opt-in):
   serviceAccountKey:   <base64>    # SA key JSON (client_email, private_key, ...) for OAuth2 bearer-token auth
@@ -783,7 +794,17 @@ config can override both fields for emulators.
 
 The access keys are the backend's static HMAC pair (minted out of
 band via `gcloud storage hmac create`, copied identically to
-every `BucketyAccess`).
+every `BucketyAccess`). `parameters.hmac="false"` (driver >= 0.2,
+mutable, per CR or as a backend parameter default) omits the pair
+- typically together with `serviceAccount`, so consumers hold
+ONLY the bucket-scoped identity instead of having its
+blast-radius win undone by the backend-wide pair riding along;
+without `serviceAccount` it yields a coordinates-only Secret for
+ambient-credential consumers. The DRIVER default stays
+pair-included: it is the incumbent, family-portable contract, and
+a minor bump must not remove Secret keys - a backend chooses the
+opt-in posture by declaring `hmac: "false"` in its parameter
+defaults.
 
 **Per-bucket service accounts (gcs driver 0.2, opt-in).** A gcs
 backend that sets `serviceAccounts.project` in its config lets a

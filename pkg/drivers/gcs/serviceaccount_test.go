@@ -589,3 +589,113 @@ func TestEnsureServiceAccountTombstone(t *testing.T) {
 		t.Errorf("tombstone diagnostic missing: %v", err)
 	}
 }
+
+// serviceAccount works as a CR parameter, as a backend default,
+// and - the piece this test pins - "" is the explicit per-CR
+// opt-out of a backend default. Immutability covers the opt-out
+// transition too.
+func TestServiceAccountEmptyOptOut(t *testing.T) {
+	d := &Driver{cfg: &Config{Project: "p", ServiceAccounts: &ServiceAccountsConfig{Project: "id-proj"}}}
+	if err := d.ValidateParameters(map[string]string{"serviceAccount": ""}); err != nil {
+		t.Errorf("explicit opt-out rejected: %v", err)
+	}
+	// Also valid on a backend without the feature: it asks for
+	// nothing.
+	off := &Driver{cfg: &Config{Project: "p"}}
+	if err := off.ValidateParameters(map[string]string{"serviceAccount": ""}); err != nil {
+		t.Errorf("opt-out on non-enabled backend rejected: %v", err)
+	}
+	// Effective transition default->"" is still a post-create
+	// mutation and gets rejected like any other change.
+	if err := d.ValidateUpdateParameters(
+		map[string]string{"serviceAccount": "orders-t1"},
+		map[string]string{"serviceAccount": ""}); err == nil {
+		t.Error("opt-out transition accepted post-create")
+	}
+	// GrantAccess treats "" exactly like absent: HMAC-only Secret.
+	// Endpoint override skips the bucket-attrs lookup, and the ""
+	// opt-out must never reach the (nil here) IAM client.
+	d = &Driver{cfg: &Config{
+		Project: "p", Endpoint: "fake:8000",
+		AccessKeyID: "id", SecretAccessKey: "sec",
+		ServiceAccounts: &ServiceAccountsConfig{Project: "id-proj"},
+	}}
+	res, err := d.GrantAccess(t.Context(), registry.GrantRequest{
+		BucketyName:       "bucket-x",
+		BucketyParameters: map[string]string{"serviceAccount": ""},
+	})
+	if err != nil {
+		t.Fatalf("grant with opt-out: %v", err)
+	}
+	if _, ok := res.SecretData["serviceAccountKey"]; ok {
+		t.Error("opt-out minted a key")
+	}
+	if res.Principal != "gcs-static" {
+		t.Errorf("principal: %q", res.Principal)
+	}
+}
+
+// hmac="false" omits the backend-wide static pair from the
+// Secret; driver default stays "true" (incumbent contract).
+func TestHMACOptOut(t *testing.T) {
+	f, srv := newFakeGCP(t, "id-proj")
+	d := saDriver(t, srv)
+	_ = f
+	ctx := context.Background()
+
+	if err := d.ValidateParameters(map[string]string{"hmac": "false"}); err != nil {
+		t.Errorf("hmac false rejected: %v", err)
+	}
+	if err := d.ValidateParameters(map[string]string{"hmac": "sometimes"}); err == nil {
+		t.Error("bad hmac value accepted")
+	}
+
+	// Default: pair present (compatibility).
+	res, err := d.GrantAccess(ctx, registry.GrantRequest{BucketyName: "bucket-x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := res.SecretData["accessKeyID"]; !ok {
+		t.Error("default grant lost the HMAC pair")
+	}
+
+	// Opt-out with a serviceAccount: SA keys only.
+	if err := d.ensureServiceAccount(ctx, "orders-t1", "bucket-x"); err != nil {
+		t.Fatal(err)
+	}
+	res, err = d.GrantAccess(ctx, registry.GrantRequest{
+		BucketyName:       "bucket-x",
+		BucketyParameters: map[string]string{"hmac": "false", "serviceAccount": "orders-t1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := res.SecretData["accessKeyID"]; ok {
+		t.Error("hmac=false Secret still carries accessKeyID")
+	}
+	if _, ok := res.SecretData["secretAccessKey"]; ok {
+		t.Error("hmac=false Secret still carries secretAccessKey")
+	}
+	if _, ok := res.SecretData["serviceAccountKey"]; !ok {
+		t.Error("hmac=false Secret missing the SA key")
+	}
+	// Coordinates survive either way.
+	if string(res.SecretData["bucket"]) != "bucket-x" || string(res.SecretData["endpoint"]) == "" {
+		t.Errorf("coordinates missing: %v", keysOf(res.SecretData))
+	}
+
+	// Opt-out without serviceAccount: coordinates-only Secret for
+	// ambient-credential consumers.
+	res, err = d.GrantAccess(ctx, registry.GrantRequest{
+		BucketyName:       "bucket-x",
+		BucketyParameters: map[string]string{"hmac": "false"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"accessKeyID", "secretAccessKey", "serviceAccountKey"} {
+		if _, ok := res.SecretData[k]; ok {
+			t.Errorf("coordinates-only Secret carries %s", k)
+		}
+	}
+}

@@ -13,7 +13,12 @@ its bucket only, and every access Secret additionally carries:
 The static HMAC pair stays in the Secret unchanged (additive keys
 per SPEC §Secret output), so S3-interop consumers keep working;
 the SA credential is what shrinks blast radius from
-"every bucket on the backend" to "this bucket".
+"every bucket on the backend" to "this bucket". Once no consumer
+of a bucket needs the S3-interop path, add `hmac: "false"`
+(mutable) and its Secrets drop the backend-wide pair entirely -
+per CR, or as a backend parameter default to make HMAC opt-in
+across the backend. A CR can conversely opt out of a
+backend-default SA with `serviceAccount: ""`.
 
 ## Backend prerequisites
 

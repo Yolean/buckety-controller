@@ -500,11 +500,28 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 		}
 	}
 	data := map[string][]byte{
-		"endpoint":        []byte(endpoint),
-		"bucket":          []byte(req.BucketyName),
-		"project":         []byte(d.cfg.Project),
-		"accessKeyID":     []byte(d.cfg.AccessKeyID),
-		"secretAccessKey": []byte(d.cfg.SecretAccessKey),
+		"endpoint": []byte(endpoint),
+		"bucket":   []byte(req.BucketyName),
+		"project":  []byte(d.cfg.Project),
+	}
+	// hmac=false opts this bucket's Secrets out of the static
+	// backend-wide pair - typically together with serviceAccount,
+	// whose blast-radius win the shared pair would otherwise
+	// undo, but a coordinates-only Secret is also legitimate for
+	// consumers with ambient credentials (Workload Identity). The
+	// DRIVER default stays true: the pair is the incumbent
+	// contract (family-portable S3-interop Secrets, minor-bump
+	// key stability); a backend imposes the opt-in posture by
+	// declaring hmac "false" in its parameter defaults.
+	includeHMAC := true
+	if v, ok := req.BucketyParameters["hmac"]; ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			includeHMAC = b
+		}
+	}
+	if includeHMAC {
+		data["accessKeyID"] = []byte(d.cfg.AccessKeyID)
+		data["secretAccessKey"] = []byte(d.cfg.SecretAccessKey)
 	}
 	if region != "" {
 		data["region"] = []byte(region)
@@ -598,14 +615,25 @@ func (d *Driver) ValidateParameters(params map[string]string) error {
 				return fmt.Errorf("parameters.labels: %w", err)
 			}
 		case "serviceAccount":
+			if v == "" {
+				// Explicit opt-out: a CR clearing a backend
+				// parameter default. Valid regardless of the
+				// backend's serviceAccounts gate, since it asks for
+				// nothing.
+				continue
+			}
 			if d.cfg.ServiceAccounts == nil {
 				return fmt.Errorf("parameters.serviceAccount requires serviceAccounts to be enabled in this backend's config")
 			}
 			if !saNameRE.MatchString(v) {
 				return fmt.Errorf("parameters.serviceAccount %q must be a valid service account ID: 6-30 characters of lowercase letters, digits and hyphens, starting with a letter and ending alphanumeric (include the namespace, e.g. via the ${name}-${namespace} template, for project-wide uniqueness)", v)
 			}
+		case "hmac":
+			if _, err := strconv.ParseBool(v); err != nil {
+				return fmt.Errorf("parameters.%s: want \"true\" or \"false\", got %q", k, v)
+			}
 		default:
-			return fmt.Errorf("unknown parameter %q (gcs v0.2 accepts: location, uniformBucketLevelAccess, versioning, lifecycle, softDeleteRetentionSeconds, labels, and serviceAccount when serviceAccounts=enabled)", k)
+			return fmt.Errorf("unknown parameter %q (gcs v0.2 accepts: location, uniformBucketLevelAccess, versioning, lifecycle, softDeleteRetentionSeconds, labels, hmac, and serviceAccount when serviceAccounts=enabled)", k)
 		}
 	}
 	return nil
