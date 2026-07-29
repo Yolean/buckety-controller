@@ -329,6 +329,29 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		return ctrl.Result{}, nil
 	}
 
+	// The implicit access is not a deletion blocker, but it must
+	// be revoked while this Buckety can still resolve its backend:
+	// left to owner-ref GC it would be deleted AFTER the Buckety,
+	// and its finalizer then has no backend to revoke against -
+	// with gcs 0.2 per-access keys that orphans a live credential
+	// on a Retain-surviving service account. So its deletion is
+	// driven from here, and the Buckety waits for the access
+	// finalizer (which performs the revocation) to finish.
+	for i := range accesses.Items {
+		a := &accesses.Items[i]
+		if a.Spec.BucketyRef.Name != bky.Name || a.Labels[bucketyv1.LabelImplicit] != "true" {
+			continue
+		}
+		if a.DeletionTimestamp.IsZero() {
+			if err := r.Delete(ctx, a); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
+		// The access deletion re-enqueues this Buckety via the
+		// access watch; the short requeue covers a lost event.
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
 	// Adopted resources are never deleted from the backend (SPEC
 	// §Adoption): the content predates this CR, or the CR never
 	// verified otherwise, so retentionPolicy=Delete degrades to

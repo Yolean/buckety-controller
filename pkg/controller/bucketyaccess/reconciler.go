@@ -125,16 +125,54 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var bky bucketyv1.Buckety
 	bkyErr := r.Get(ctx, types.NamespacedName{Namespace: access.Namespace, Name: access.Spec.BucketyRef.Name}, &bky)
 
-	// Deletion path.
+	// Deletion path. SPEC: deletion blocks on RevokeAccess
+	// succeeding - and since gcs 0.2 a principal can be a live
+	// key, so the skip paths here must never silently orphan one.
 	if !access.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&access, bucketyv1.FinalizerCleanup) {
-			if bkyErr == nil {
-				if backend, ok := r.Config.Lookup(bky.Spec.Backend); ok {
+			switch {
+			case bkyErr != nil && !apierrors.IsNotFound(bkyErr):
+				// Transient Buckety read failure: retry instead of
+				// falling through to a finalizer removal that would
+				// skip revocation.
+				return ctrl.Result{}, bkyErr
+			case bkyErr == nil:
+				backend, ok := r.Config.Lookup(bky.Spec.Backend)
+				if !ok && access.Status.Principal != "" {
+					// A principal exists but no backend to revoke it
+					// against. Letting the finalizer go would orphan
+					// the credential, so deletion blocks with the
+					// same remedy as Buckety deletion under
+					// retentionPolicy=Delete: restore the backend in
+					// buckety-controller.yaml.
+					base := access.DeepCopy()
+					msg := fmt.Sprintf("cannot revoke principal %q: backend %q is not registered in buckety-controller.yaml; restore it to let this BucketyAccess go", access.Status.Principal, bky.Spec.Backend)
+					r.eventIfTransition(&access, base.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable",
+						corev1.EventTypeWarning, "DeletionBlocked", msg)
+					setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", msg, access.Generation)
+					if err := r.Status().Patch(ctx, &access, client.MergeFrom(base)); err != nil {
+						return ctrl.Result{}, err
+					}
+					if r.RequeueAfter != nil {
+						return r.RequeueAfter(), nil
+					}
+					return ctrl.Result{}, nil
+				}
+				if ok {
 					if err := backend.Driver.RevokeAccess(ctx, access.Status.Principal); err != nil {
 						log.Error(err, "RevokeAccess failed")
 						return ctrl.Result{}, err
 					}
 				}
+			default:
+				// Buckety already gone (NotFound): no backend can be
+				// resolved and no operator remedy would ever unblock,
+				// so the finalizer is released. The systematic route
+				// here - the implicit access, owner-ref-GC'd after
+				// its Buckety - is prevented by the Buckety
+				// reconciler deleting it BEFORE releasing its own
+				// finalizer, so revocation ran with the Buckety
+				// still present.
 			}
 			controllerutil.RemoveFinalizer(&access, bucketyv1.FinalizerCleanup)
 			if err := r.Update(ctx, &access); err != nil {
@@ -301,6 +339,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// A changed principal means GrantAccess re-minted (the Secret
+	// was lost, hand-edited, or its key invalidated): revoke the
+	// replaced credential now that the Secret carries its
+	// successor. Without this, every re-mint orphans a live key
+	// on the gcs SA until GCP's 10-keys-per-SA cap wedges
+	// Keys.Create permanently (checkit review finding 1).
+	// Ordering makes it self-healing: status.principal keeps
+	// naming the old key until revocation succeeds, so a failure
+	// retries here while GrantAccess keeps returning the
+	// already-written replacement.
+	if old := access.Status.Principal; old != "" && old != res.Principal {
+		if rerr := backend.Driver.RevokeAccess(ctx, old); rerr != nil {
+			r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokeFailed",
+				corev1.EventTypeWarning, "RevokeFailed", rerr.Error())
+			setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokeFailed", rerr.Error(), access.Generation)
+			_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+			return ctrl.Result{}, rerr
+		}
+	}
 	access.Status.Principal = res.Principal
 
 	// ScopingNotImplemented if the driver is not actually

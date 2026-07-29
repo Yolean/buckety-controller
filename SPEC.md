@@ -812,13 +812,35 @@ additionally needs `storage.buckets.getIamPolicy/setIamPolicy`).
 Ownership is stamped as JSON into each SA's description and
 verified before every bind/mint/delete, so a tenant naming a
 foreign SA in `parameters.serviceAccount` is refused rather than
-handed its keys. Role scoping is still NOT implemented: all
-accesses share the bucket-scoped SA regardless of role, and
-`ScopingNotImplemented` continues to surface for non-ReadWrite
-roles. Scheduled key rotation is deliberately deferred (see
-Non-goals); the reuse check plus one-key-per-access keeps within
-GCP's 10-user-managed-keys-per-SA limit, bounding a bucket at ~10
-accesses until rotation lands.
+handed its keys. (The marker is trusted as written: anyone
+holding serviceAccountAdmin on the identity project can rewrite
+descriptions, which is one more reason that project must be
+dedicated to buckety-minted identities.) Role scoping is still
+NOT implemented: all accesses share the bucket-scoped SA
+regardless of role, and `ScopingNotImplemented` continues to
+surface for non-ReadWrite roles. Scheduled key rotation is
+deliberately deferred (see Non-goals); the reuse check plus
+one-key-per-access keeps within GCP's 10-user-managed-keys-per-SA
+limit, bounding a bucket at ~10 CONCURRENT accesses until
+rotation lands - not cumulative lifecycle churn, because
+credentials never outlive their access (next paragraph).
+
+**Retention semantics.** `retentionPolicy=Retain` retains the
+backend data unit - the bucket, its IAM policy, and its (by then
+keyless) service account - and NEVER credentials: keys are
+revoked with each `BucketyAccess` under every policy, replaced
+keys are revoked as soon as their successor is written, and the
+implicit access is revoked before the `Buckety` itself lets go.
+Keeping the SA is deliberate: the retained bucket's policy still
+references it (deleting it would leave a dangling
+`deleted:serviceAccount:` binding), and recreate-with-adoption -
+the flow Retain exists for - finds a marker-matching keyless SA
+instead of hitting GCP's 30-day tombstone on the reserved name.
+Permanent teardowns that must reclaim SA quota delete the SA out
+of band; the ownership marker identifies buckety's. If a leak
+ever wedges an SA at the key cap, surplus `USER_MANAGED` keys on
+a marker-verified SA are safe to delete server-side and the fleet
+re-mints within one reconcile.
 
 ## Adoption
 

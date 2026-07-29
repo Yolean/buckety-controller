@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -154,10 +155,13 @@ func TestWriteSecret(t *testing.T) {
 }
 
 // grantRecorder is a minimal registry.Driver that records what
-// GrantAccess received.
+// GrantAccess received and which principals were revoked.
 type grantRecorder struct {
-	req  *registry.GrantRequest
-	data map[string][]byte
+	req       *registry.GrantRequest
+	data      map[string][]byte
+	principal string
+	revoked   []string
+	revokeErr error
 }
 
 func (g *grantRecorder) Name() string    { return "rec" }
@@ -169,9 +173,16 @@ func (g *grantRecorder) EnsureBuckety(context.Context, registry.EnsureRequest) e
 func (g *grantRecorder) DeleteBuckety(context.Context, registry.DeleteRequest) error { return nil }
 func (g *grantRecorder) GrantAccess(_ context.Context, req registry.GrantRequest) (registry.GrantResult, error) {
 	g.req = &req
-	return registry.GrantResult{SecretData: g.data, Principal: "rec-principal", Scoped: true}, nil
+	p := g.principal
+	if p == "" {
+		p = "rec-principal"
+	}
+	return registry.GrantResult{SecretData: g.data, Principal: p, Scoped: true}, nil
 }
-func (g *grantRecorder) RevokeAccess(context.Context, string) error            { return nil }
+func (g *grantRecorder) RevokeAccess(_ context.Context, principal string) error {
+	g.revoked = append(g.revoked, principal)
+	return g.revokeErr
+}
 func (g *grantRecorder) ValidateParameters(map[string]string) error            { return nil }
 func (g *grantRecorder) ValidateUpdateParameters(_, _ map[string]string) error { return nil }
 func (g *grantRecorder) ValidateAccessParameters(map[string]string) error      { return nil }
@@ -302,4 +313,177 @@ func TestGrantGatedOnSecretAndFedExistingData(t *testing.T) {
 
 func reconcilerRequest(ns, name string) reconcile.Request {
 	return reconcile.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}
+}
+
+// A re-mint that changes the principal must revoke the replaced
+// one AFTER the Secret write, or every lost/hand-edited Secret
+// orphans a live key until the SA's 10-key cap wedges Keys.Create
+// (checkit review finding 1). status.principal advances only once
+// revocation succeeds, so failures retry.
+func TestReplacedPrincipalRevoked(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.Now()
+	newObjs := func() (*bucketyv1.Buckety, *bucketyv1.BucketyAccess) {
+		bky := &bucketyv1.Buckety{
+			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "t1"},
+			Spec:       bucketyv1.BucketySpec{Backend: "be"},
+			Status: bucketyv1.BucketyStatus{
+				Backend: "be", BackendResourceName: "t1-orders",
+				Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "EnsuredOnBackend", LastTransitionTime: now}},
+			},
+		}
+		access := &bucketyv1.BucketyAccess{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "reader", Namespace: "t1", UID: "uid-a",
+				Finalizers: []string{bucketyv1.FinalizerCleanup},
+			},
+			Spec: bucketyv1.BucketyAccessSpec{
+				BucketyRef:            bucketyv1.BucketyRef{Name: "orders"},
+				CredentialsSecretName: "reader-creds",
+			},
+			Status: bucketyv1.BucketyAccessStatus{Principal: "projects/p/serviceAccounts/x/keys/old"},
+		}
+		return bky, access
+	}
+	run := func(t *testing.T, rec *grantRecorder) (client.Client, *bucketyv1.BucketyAccess, error) {
+		t.Helper()
+		bky, access := newObjs()
+		cl := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(bky, access).
+			WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+			Build()
+		r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{
+			Backends: map[string]config.Backend{"be": {Name: "be", Driver: rec}},
+		}}
+		_, err := r.Reconcile(context.Background(), reconcilerRequest("t1", "reader"))
+		var got bucketyv1.BucketyAccess
+		if gerr := cl.Get(context.Background(), types.NamespacedName{Namespace: "t1", Name: "reader"}, &got); gerr != nil {
+			t.Fatal(gerr)
+		}
+		return cl, &got, err
+	}
+
+	// Principal change: old revoked, status advances.
+	rec := &grantRecorder{
+		data:      map[string][]byte{"bucket": []byte("t1-orders")},
+		principal: "projects/p/serviceAccounts/x/keys/new",
+	}
+	_, got, err := run(t, rec)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(rec.revoked) != 1 || rec.revoked[0] != "projects/p/serviceAccounts/x/keys/old" {
+		t.Errorf("revoked: %v", rec.revoked)
+	}
+	if got.Status.Principal != "projects/p/serviceAccounts/x/keys/new" {
+		t.Errorf("principal: %q", got.Status.Principal)
+	}
+
+	// Unchanged principal: no revocation.
+	rec = &grantRecorder{
+		data:      map[string][]byte{"bucket": []byte("t1-orders")},
+		principal: "projects/p/serviceAccounts/x/keys/old",
+	}
+	if _, _, err := run(t, rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.revoked) != 0 {
+		t.Errorf("steady state revoked: %v", rec.revoked)
+	}
+
+	// Revocation failure: reconcile errors and status.principal
+	// still names the old key so the retry revokes it again.
+	rec = &grantRecorder{
+		data:      map[string][]byte{"bucket": []byte("t1-orders")},
+		principal: "projects/p/serviceAccounts/x/keys/new",
+		revokeErr: context.DeadlineExceeded,
+	}
+	_, got, err = run(t, rec)
+	if err == nil {
+		t.Fatal("revoke failure swallowed")
+	}
+	if got.Status.Principal != "projects/p/serviceAccounts/x/keys/old" {
+		t.Errorf("principal advanced past failed revoke: %q", got.Status.Principal)
+	}
+}
+
+// Deleting an access whose backend is missing from config must
+// BLOCK while a principal exists (releasing the finalizer would
+// orphan the credential), and proceed when nothing was granted.
+func TestDeletionBlocksWithoutBackend(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	newAccess := func(principal string) (*bucketyv1.Buckety, *bucketyv1.BucketyAccess) {
+		bky := &bucketyv1.Buckety{
+			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "t1"},
+			Spec:       bucketyv1.BucketySpec{Backend: "gone"},
+		}
+		return bky, &bucketyv1.BucketyAccess{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "reader", Namespace: "t1",
+				Finalizers: []string{bucketyv1.FinalizerCleanup},
+			},
+			Spec: bucketyv1.BucketyAccessSpec{
+				BucketyRef:            bucketyv1.BucketyRef{Name: "orders"},
+				CredentialsSecretName: "reader-creds",
+			},
+			Status: bucketyv1.BucketyAccessStatus{Principal: principal},
+		}
+	}
+
+	// Principal present: blocked with a condition.
+	bky, access := newAccess("projects/p/serviceAccounts/x/keys/k1")
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky, access).
+		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+		Build()
+	r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{Backends: map[string]config.Backend{}}}
+	if err := cl.Delete(ctx, access); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, reconcilerRequest("t1", "reader")); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var got bucketyv1.BucketyAccess
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "t1", Name: "reader"}, &got); err != nil {
+		t.Fatalf("access should still exist (blocked): %v", err)
+	}
+	blocked := false
+	for _, c := range got.Status.Conditions {
+		if c.Type == "Ready" && c.Reason == "BackendUnavailable" {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Errorf("no blocking condition: %+v", got.Status.Conditions)
+	}
+
+	// No principal ever granted: deletion proceeds.
+	bky, access = newAccess("")
+	cl = fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky, access).
+		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+		Build()
+	r = &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{Backends: map[string]config.Backend{}}}
+	if err := cl.Delete(ctx, access); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, reconcilerRequest("t1", "reader")); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "t1", Name: "reader"}, &got); !apierrors.IsNotFound(err) {
+		t.Errorf("ungrated access not released: %v", err)
+	}
 }
