@@ -154,3 +154,93 @@ func TestDeleteWaitsForImplicitAccessRevocation(t *testing.T) {
 		t.Errorf("buckety not released after implicit access completed: %v", err)
 	}
 }
+
+// Regression for ISSUE_status_message_reconcile_loop.md: a
+// volatile provider error message (GCS mints a fresh errorId per
+// 403) made every status patch a real change, whose watch event
+// triggered an immediate reconcile - ~18/s with workqueue backoff
+// bypassed, since watch events are Adds, not requeues. Condition
+// messages must therefore never DRIVE a patch, only ride along
+// with status/reason/field changes.
+func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	bky := &bucketyv1.Buckety{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "t1"},
+		Spec:       bucketyv1.BucketySpec{Backend: "be"},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky).
+		WithStatusSubresource(&bucketyv1.Buckety{}).
+		Build()
+	r := &Reconciler{Client: cl, Scheme: scheme}
+	key := types.NamespacedName{Namespace: "t1", Name: "orders"}
+
+	// Attempt #1: condition appears - patched.
+	base := bky.DeepCopy()
+	setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=aaa111", bky.Generation)
+	if err := r.patchStatus(ctx, bky, base); err != nil {
+		t.Fatal(err)
+	}
+	var got bucketyv1.Buckety
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Status.Conditions) != 1 || got.Status.Conditions[0].Message != "403 errorId=aaa111" {
+		t.Fatalf("first attempt not persisted: %+v", got.Status.Conditions)
+	}
+	rvAfterFirst := got.ResourceVersion
+
+	// Attempt #2: same status+reason, fresh errorId - the exact
+	// loop driver. Must not write.
+	current := got.DeepCopy()
+	base = got.DeepCopy()
+	setCond(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=bbb222", current.Generation)
+	if err := r.patchStatus(ctx, current, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ResourceVersion != rvAfterFirst {
+		t.Errorf("message-only change bumped resourceVersion %s -> %s; this is the ~18/s loop", rvAfterFirst, got.ResourceVersion)
+	}
+	if got.Status.Conditions[0].Message != "403 errorId=aaa111" {
+		t.Errorf("skipped patch mutated stored message: %q", got.Status.Conditions[0].Message)
+	}
+
+	// Attempt #3: reason changes - a real transition; the current
+	// message rides along.
+	current = got.DeepCopy()
+	base = got.DeepCopy()
+	setCond(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed", "403 errorId=ccc333", current.Generation)
+	if err := r.patchStatus(ctx, current, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Conditions[0].Reason != "EnsureFailed" || got.Status.Conditions[0].Message != "403 errorId=ccc333" {
+		t.Errorf("reason transition not persisted with its message: %+v", got.Status.Conditions[0])
+	}
+
+	// Non-condition status fields always drive a patch.
+	current = got.DeepCopy()
+	base = got.DeepCopy()
+	current.Status.ObservedGeneration = 7
+	if err := r.patchStatus(ctx, current, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ObservedGeneration != 7 {
+		t.Error("field change not patched")
+	}
+}

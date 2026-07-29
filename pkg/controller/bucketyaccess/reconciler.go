@@ -154,7 +154,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 					r.eventIfTransition(&access, base.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable",
 						corev1.EventTypeWarning, "DeletionBlocked", msg)
 					setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", msg, access.Generation)
-					if err := r.Status().Patch(ctx, &access, client.MergeFrom(base)); err != nil {
+					if err := r.patchStatus(ctx, &access, base); err != nil {
 						return ctrl.Result{}, err
 					}
 					if r.RequeueAfter != nil {
@@ -214,7 +214,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				"BucketyNotFound",
 				fmt.Sprintf("Buckety %q not found in namespace %q", access.Spec.BucketyRef.Name, access.Namespace),
 				access.Generation)
-			return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+			return ctrl.Result{}, r.patchStatus(ctx, &access, baseAccess)
 		}
 		return ctrl.Result{}, bkyErr
 	}
@@ -226,7 +226,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			"WaitingForBuckety",
 			"Buckety is not Ready yet; will retry",
 			access.Generation)
-		_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+		_ = r.patchStatus(ctx, &access, baseAccess)
 		if r.RequeueAfter != nil {
 			return r.RequeueAfter(), nil
 		}
@@ -242,7 +242,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			"BackendUnavailable",
 			fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Status.Backend),
 			access.Generation)
-		return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+		return ctrl.Result{}, r.patchStatus(ctx, &access, baseAccess)
 	}
 
 	// Parameter validation, also done at admission when the webhook
@@ -253,7 +253,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters",
 			corev1.EventTypeWarning, "InvalidParameters", err.Error())
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), access.Generation)
-		return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+		return ctrl.Result{}, r.patchStatus(ctx, &access, baseAccess)
 	}
 
 	// The Buckety's resolved parameter view rides along on the
@@ -264,7 +264,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed",
 			corev1.EventTypeWarning, "GrantFailed", err.Error())
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed", err.Error(), access.Generation)
-		return ctrl.Result{}, r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+		return ctrl.Result{}, r.patchStatus(ctx, &access, baseAccess)
 	}
 
 	// Refuse to touch a Secret this BucketyAccess does not control:
@@ -288,7 +288,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		msg := fmt.Sprintf("secret %q exists and is not managed by this BucketyAccess; delete it or pick another credentialsSecretName", access.Spec.CredentialsSecretName)
 		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretConflict", corev1.EventTypeWarning, "SecretConflict", msg)
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretConflict", msg, access.Generation)
-		if err := r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess)); err != nil {
+		if err := r.patchStatus(ctx, &access, baseAccess); err != nil {
 			return ctrl.Result{}, err
 		}
 		// Periodic requeue notices when the conflicting Secret goes
@@ -316,7 +316,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed",
 			corev1.EventTypeWarning, "GrantFailed", err.Error())
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed", err.Error(), access.Generation)
-		_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+		_ = r.patchStatus(ctx, &access, baseAccess)
 		return ctrl.Result{}, err
 	}
 
@@ -339,7 +339,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretWriteFailed",
 			corev1.EventTypeWarning, "SecretWriteFailed", err.Error())
 		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretWriteFailed", err.Error(), access.Generation)
-		_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+		_ = r.patchStatus(ctx, &access, baseAccess)
 		return ctrl.Result{}, err
 	}
 
@@ -358,7 +358,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokeFailed",
 				corev1.EventTypeWarning, "RevokeFailed", rerr.Error())
 			setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokeFailed", rerr.Error(), access.Generation)
-			_ = r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess))
+			_ = r.patchStatus(ctx, &access, baseAccess)
 			return ctrl.Result{}, rerr
 		}
 	}
@@ -382,7 +382,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		fmt.Sprintf("secret %q minted for backend resource %q", access.Spec.CredentialsSecretName, bky.Status.BackendResourceName))
 	setCond(&access.Status.Conditions, "Ready", metav1.ConditionTrue, "SecretMinted", "", access.Generation)
 	access.Status.ObservedGeneration = access.Generation
-	if err := r.Status().Patch(ctx, &access, client.MergeFrom(baseAccess)); err != nil {
+	if err := r.patchStatus(ctx, &access, baseAccess); err != nil {
 		return ctrl.Result{}, err
 	}
 	if r.RequeueAfter != nil {
@@ -422,6 +422,31 @@ func (r *Reconciler) writeSecret(ctx context.Context, access *bucketyv1.BucketyA
 		return nil
 	}
 	return r.Update(ctx, secret)
+}
+
+// patchStatus writes status only when something OTHER than
+// condition messages changed since base; see the buckety
+// reconciler's counterpart for the full rationale
+// (ISSUE_status_message_reconcile_loop.md): a volatile provider
+// error message would otherwise loop patch -> own-watch event ->
+// reconcile -> new message at the provider's answer rate, with
+// workqueue backoff bypassed.
+func (r *Reconciler) patchStatus(ctx context.Context, access, base *bucketyv1.BucketyAccess) error {
+	if !statusChangedBeyondMessages(&base.Status, &access.Status) {
+		return nil
+	}
+	return r.Status().Patch(ctx, access, client.MergeFrom(base))
+}
+
+func statusChangedBeyondMessages(base, cur *bucketyv1.BucketyAccessStatus) bool {
+	b, c := base.DeepCopy(), cur.DeepCopy()
+	for i := range b.Conditions {
+		b.Conditions[i].Message = ""
+	}
+	for i := range c.Conditions {
+		c.Conditions[i].Message = ""
+	}
+	return !equality.Semantic.DeepEqual(b, c)
 }
 
 func isReady(bky *bucketyv1.Buckety) bool {
