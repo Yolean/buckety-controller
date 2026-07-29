@@ -42,7 +42,11 @@
         },
         "endpoint": {
           "type": "string",
-          "description": "Overrides the IAM API endpoint (full URL) for emulators and tests; setting it disables authentication. Unset reaches iam.googleapis.com with ADC."
+          "description": "Overrides the IAM API endpoint (full URL), e.g. for Private Service Connect. Authentication stays on unless insecure is also set. Unset reaches iam.googleapis.com with ADC."
+        },
+        "insecure": {
+          "type": "boolean",
+          "description": "Disables authentication towards endpoint - emulators and tests ONLY. A separate explicit flag so an endpoint typo cannot silently turn credentials off; requires endpoint."
         }
       }
     }

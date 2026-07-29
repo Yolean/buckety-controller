@@ -143,10 +143,15 @@ type ServiceAccountsConfig struct {
 	// projects holding unrelated service accounts. Cross-project
 	// bucket IAM bindings make the split free.
 	Project string `json:"project"`
-	// Endpoint overrides the IAM API endpoint (full URL). For
-	// emulators and tests; unset reaches iam.googleapis.com with
-	// ADC, and setting it disables authentication.
+	// Endpoint overrides the IAM API endpoint (full URL), e.g.
+	// for Private Service Connect. Authentication stays on unless
+	// Insecure is also set; unset reaches iam.googleapis.com.
 	Endpoint string `json:"endpoint,omitempty"`
+	// Insecure disables authentication on Endpoint, for emulators
+	// and tests ONLY. A separate explicit flag so that an
+	// endpoint typo cannot silently turn credentials off
+	// (checkit review finding 4). Requires Endpoint.
+	Insecure bool `json:"insecure,omitempty"`
 }
 
 func factory(raw json.RawMessage) (registry.Driver, error) {
@@ -187,9 +192,15 @@ func factory(raw json.RawMessage) (registry.Driver, error) {
 		if c.ServiceAccounts.Project == "" {
 			return nil, fmt.Errorf("gcs config: serviceAccounts: missing required field %q (a dedicated identity project, separate from the bucket project, is strongly recommended)", "project")
 		}
+		if c.ServiceAccounts.Insecure && c.ServiceAccounts.Endpoint == "" {
+			return nil, fmt.Errorf("gcs config: serviceAccounts.insecure requires serviceAccounts.endpoint (it disables authentication towards that endpoint; emulators and tests only)")
+		}
 		var opts []option.ClientOption
 		if ep := c.ServiceAccounts.Endpoint; ep != "" {
-			opts = append(opts, option.WithEndpoint(ep), option.WithoutAuthentication())
+			opts = append(opts, option.WithEndpoint(ep))
+		}
+		if c.ServiceAccounts.Insecure {
+			opts = append(opts, option.WithoutAuthentication())
 		}
 		iamsvc, err = iam.NewService(context.Background(), opts...)
 		if err != nil {

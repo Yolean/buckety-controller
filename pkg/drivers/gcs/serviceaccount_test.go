@@ -30,6 +30,9 @@ type fakeGCP struct {
 	keySeq         int
 	policies       map[string][]*policyBinding // bucket -> bindings
 	setPolicyCalls int
+	// tombstoned emails 404 on Get but still 409 on Create,
+	// GCP's ~30-day soft-deletion name reservation.
+	tombstoned map[string]bool
 }
 
 type policyBinding struct {
@@ -40,10 +43,11 @@ type policyBinding struct {
 func newFakeGCP(t *testing.T, project string) (*fakeGCP, *httptest.Server) {
 	t.Helper()
 	f := &fakeGCP{
-		project:  project,
-		sas:      map[string]*iam.ServiceAccount{},
-		keys:     map[string]map[string]*iam.ServiceAccountKey{},
-		policies: map[string][]*policyBinding{},
+		project:    project,
+		sas:        map[string]*iam.ServiceAccount{},
+		keys:       map[string]map[string]*iam.ServiceAccountKey{},
+		policies:   map[string][]*policyBinding{},
+		tombstoned: map[string]bool{},
 	}
 	mux := http.NewServeMux()
 
@@ -68,7 +72,7 @@ func newFakeGCP(t *testing.T, project string) (*fakeGCP, *httptest.Server) {
 		email := req.AccountId + "@" + r.PathValue("proj") + ".iam.gserviceaccount.com"
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if _, exists := f.sas[email]; exists {
+		if _, exists := f.sas[email]; exists || f.tombstoned[email] {
 			writeErr(w, 409, "already exists")
 			return
 		}
@@ -204,7 +208,7 @@ func saDriver(t *testing.T, srv *httptest.Server) *Driver {
 	raw := fmt.Sprintf(`{
 		"project": "bucket-proj", "endpoint": "fake-gcs:8000", "region": "r1",
 		"accessKeyID": "id", "secretAccessKey": "sec",
-		"serviceAccounts": {"project": "id-proj", "endpoint": %q}
+		"serviceAccounts": {"project": "id-proj", "endpoint": %q, "insecure": true}
 	}`, srv.URL)
 	drv, err := factory(json.RawMessage(raw))
 	if err != nil {
@@ -244,7 +248,12 @@ func TestServiceAccountConfigValidation(t *testing.T) {
 	if _, err := factory(json.RawMessage(`{"project": "p", "accessKeyID": "a", "secretAccessKey": "s", "serviceAccounts": {}}`)); err == nil {
 		t.Error("serviceAccounts without project accepted")
 	}
-	drv, err := factory(json.RawMessage(`{"project": "p", "accessKeyID": "a", "secretAccessKey": "s", "serviceAccounts": {"project": "id-proj", "endpoint": "http://127.0.0.1:1"}}`))
+	// insecure is only meaningful together with endpoint; alone it
+	// is a config error, not a silent no-op.
+	if _, err := factory(json.RawMessage(`{"project": "p", "accessKeyID": "a", "secretAccessKey": "s", "serviceAccounts": {"project": "id-proj", "insecure": true}}`)); err == nil {
+		t.Error("serviceAccounts.insecure without endpoint accepted")
+	}
+	drv, err := factory(json.RawMessage(`{"project": "p", "accessKeyID": "a", "secretAccessKey": "s", "serviceAccounts": {"project": "id-proj", "endpoint": "http://127.0.0.1:1", "insecure": true}}`))
 	if err != nil {
 		t.Fatalf("valid serviceAccounts config rejected: %v", err)
 	}
@@ -559,5 +568,24 @@ func TestDeleteBucketyRemovesServiceAccount(t *testing.T) {
 	}
 	if f.sas["victim@id-proj.iam.gserviceaccount.com"] == nil {
 		t.Error("foreign SA deleted")
+	}
+}
+
+// A soft-deleted SA holds its name for ~30 days: Create conflicts
+// while Get sees nothing. That state never converges on retries,
+// so the driver must name the tombstone instead of wrapping the
+// misleading create/get error (checkit review finding 2).
+func TestEnsureServiceAccountTombstone(t *testing.T) {
+	f, srv := newFakeGCP(t, "id-proj")
+	d := saDriver(t, srv)
+	f.mu.Lock()
+	f.tombstoned["orders-t1@id-proj.iam.gserviceaccount.com"] = true
+	f.mu.Unlock()
+	err := d.ensureServiceAccount(context.Background(), "orders-t1", "bucket-x")
+	if err == nil {
+		t.Fatal("tombstoned SA creation succeeded")
+	}
+	if !strings.Contains(err.Error(), "30 days") || !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("tombstone diagnostic missing: %v", err)
 	}
 }

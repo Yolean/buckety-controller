@@ -83,6 +83,15 @@ func (d *Driver) ensureServiceAccount(ctx context.Context, shortName, bucket str
 			// Raced another creator; the re-fetched marker decides
 			// whether it is ours.
 			sa, err = d.iamsvc.Projects.ServiceAccounts.Get(resource).Context(ctx).Do()
+			if isNotFound(err) {
+				// Create conflicts while Get sees nothing: a
+				// soft-deleted SA holds the name. GCP reserves a
+				// deleted SA's ID for ~30 days, so this state does
+				// not converge on retries and the generic create
+				// error would hide the actual cause (checkit review
+				// finding 2).
+				return fmt.Errorf("gcs: service account ID %q is reserved by a recently deleted account; GCP holds deleted SA names for ~30 days. Wait out the window, undelete it if its numeric unique ID is known (gcloud iam service-accounts undelete), or use a different parameters.serviceAccount", email)
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("gcs: create service account %q (needs roles/iam.serviceAccountAdmin on project %q): %w", email, d.cfg.ServiceAccounts.Project, err)
