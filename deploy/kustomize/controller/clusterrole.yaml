@@ -3,8 +3,14 @@ kind: ClusterRole
 metadata:
   name: buckety-controller
 rules:
+# Bucketys are only ever read and patched (finalizer, status);
+# the controller creates and deletes BucketyAccess (the implicit
+# access) but never a Buckety.
 - apiGroups: [buckety.yolean.se]
-  resources: [bucketies, bucketyaccesses]
+  resources: [bucketies]
+  verbs: [get, list, watch, update, patch]
+- apiGroups: [buckety.yolean.se]
+  resources: [bucketyaccesses]
   verbs: [get, list, watch, create, update, patch, delete]
 - apiGroups: [buckety.yolean.se]
   resources: [bucketies/status, bucketyaccesses/status]

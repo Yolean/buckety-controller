@@ -3,6 +3,13 @@ kind: Kustomization
 # Controller-side resources: RBAC, Service, Deployment, webhook
 # configuration. Apply against a cluster where ../crd/ is
 # already installed. ../base/ composes both.
+#
+# The namespace is part of the contract, not a default: the
+# ClusterRoleBinding subject, the webhook clientConfig and the
+# certgen Jobs all name `buckety`, and cannot follow a namespace
+# transformer applied by an overlay only partially. Set here so
+# every composition of this directory is self-consistent.
+namespace: buckety
 resources:
 - serviceaccount.yaml
 - clusterrole.yaml
