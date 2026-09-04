@@ -124,10 +124,13 @@ func (d *Driver) Version() string { return version }
 // content.
 func (d *Driver) InspectBuckety(ctx context.Context, name string) (registry.Inspection, error) {
 	if _, err := d.client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(name)}); err != nil {
-		if isNotFound(err) {
+		switch {
+		case isNotFound(err):
 			return registry.Inspection{}, nil
+		case isForbidden(err):
+			return registry.Inspection{}, fmt.Errorf("s3: bucket %q exists but is not accessible with this backend's credentials (name likely taken by another account): %w", name, err)
 		}
-		return registry.Inspection{}, fmt.Errorf("s3: bucket %q exists but is not accessible with this backend's credentials (name likely taken by another account): %w", name, err)
+		return registry.Inspection{}, fmt.Errorf("s3: head bucket %q: %w", name, err)
 	}
 	objs, err := d.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
 		Bucket: aws.String(name), MaxKeys: aws.Int32(1),
@@ -182,7 +185,10 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 		// ours
 	case isAlreadyExists(err):
 		if _, herr := d.client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(req.Name)}); herr != nil {
-			return fmt.Errorf("s3: bucket %q exists but is not accessible with this backend's credentials (name likely taken by another account): %w", req.Name, herr)
+			if isForbidden(herr) {
+				return fmt.Errorf("s3: bucket %q exists but is not accessible with this backend's credentials (name likely taken by another account): %w", req.Name, herr)
+			}
+			return fmt.Errorf("s3: head bucket %q after create conflict: %w", req.Name, herr)
 		}
 	default:
 		return fmt.Errorf("s3: create bucket %q: %w", req.Name, err)
@@ -469,6 +475,24 @@ func isBucketNotEmpty(err error) bool {
 func isAccessDenied(err error) bool {
 	var api smithy.APIError
 	return errors.As(err, &api) && api.ErrorCode() == "AccessDenied"
+}
+
+// isForbidden reports a 403 on HeadBucket, the one signal that a
+// bucket exists under someone else's account (names are global).
+// HeadBucket answers with no body, so the SDK synthesizes the
+// code "Forbidden" or leaves only the status; a timeout, DNS
+// failure or 500 is none of these and must not be reported as
+// "taken by another account".
+func isForbidden(err error) bool {
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		switch api.ErrorCode() {
+		case "Forbidden", "AccessDenied":
+			return true
+		}
+	}
+	var httpErr interface{ HTTPStatusCode() int }
+	return errors.As(err, &httpErr) && httpErr.HTTPStatusCode() == http.StatusForbidden
 }
 
 // isNotFound reports whether err is the S3 service signalling a
