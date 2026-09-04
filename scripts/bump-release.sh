@@ -35,22 +35,7 @@ fi
 
 TAG="$(date -u +%Y%m%dT%H%M%SZ)"
 
-rm -rf target/linux/amd64 oci
-# -buildvcs=false is the reproducibility lever: with it on (the default),
-# Go embeds the commit SHA and a "modified" flag, which makes the digest
-# depend on whether the tree had uncommitted files at build time. Off,
-# the binary is a pure function of source + flags + Go version.
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-  -trimpath \
-  -buildvcs=false \
-  -ldflags "-s -w -X main.version=${TAG}" \
-  -o target/linux/amd64/buckety \
-  ./cmd/buckety
-
-IMAGE="ghcr.io/yolean/buckety-controller:${TAG}" \
-  contain build --output ./oci --push=false >/dev/null
-
-DIGEST="$(jq -r '.manifests[0].digest' oci/index.json)"
+DIGEST="$(scripts/build-image.sh "$TAG" ./oci)"
 [[ "$DIGEST" == sha256:* ]] || { echo "unexpected digest: $DIGEST" >&2; exit 1; }
 
 ( cd deploy/kustomize/release \
