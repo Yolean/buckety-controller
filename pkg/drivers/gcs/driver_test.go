@@ -301,7 +301,7 @@ func TestUpdateForDrift(t *testing.T) {
 // knob, drifted or not: a backend with replace-like update
 // semantics (fake-gcs-server resets fields absent from the
 // payload) must not un-converge settled values. Seen live as
-// portable-blobs-cr flaking on versioning (run 29509508991): the
+// portable-blobs-cr flaking on versioning: the
 // emulator drops UBLA/lifecycle, the resulting perpetual drift
 // update wiped the already-correct versioning flag.
 func TestUpdateForDriftCarriesAllManagedKnobs(t *testing.T) {

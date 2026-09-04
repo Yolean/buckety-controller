@@ -638,7 +638,7 @@ func TestDeleteBucketyRemovesServiceAccount(t *testing.T) {
 // A soft-deleted SA holds its name for ~30 days: Create conflicts
 // while Get sees nothing. That state never converges on retries,
 // so the driver must name the tombstone instead of wrapping the
-// misleading create/get error (checkit review finding 2).
+// misleading create/get error.
 func TestEnsureServiceAccountTombstone(t *testing.T) {
 	f, srv := newFakeGCP(t, "id-proj")
 	d := saDriver(t, srv)

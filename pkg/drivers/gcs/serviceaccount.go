@@ -90,8 +90,7 @@ func (d *Driver) ensureServiceAccount(ctx context.Context, shortName, bucket str
 				// soft-deleted SA holds the name. GCP reserves a
 				// deleted SA's ID for ~30 days, so this state does
 				// not converge on retries and the generic create
-				// error would hide the actual cause (checkit review
-				// finding 2).
+				// error would hide the actual cause.
 				return fmt.Errorf("gcs: service account ID %q is reserved by a recently deleted account; GCP holds deleted SA names for ~30 days. Wait out the window, undelete it if its numeric unique ID is known (gcloud iam service-accounts undelete), or use a different parameters.serviceAccount", email)
 			}
 		}

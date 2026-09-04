@@ -183,7 +183,6 @@ func (d *Driver) ValidateParameters(params map[string]string) error {
 			}
 		case strings.HasPrefix(k, "config."):
 			// Kafka topic-config keys; broker validates content.
-			_ = v
 		default:
 			return fmt.Errorf("unknown parameter %q (kadm v0.1 accepts: partitions, replicationFactor, config.*)", k)
 		}

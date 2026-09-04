@@ -218,7 +218,7 @@ func TestLifecycleEqual(t *testing.T) {
 
 // versitygw answers HTTP 501 with its own error code
 // (VersioningNotConfigured) rather than NotImplemented; the
-// fail-safe keys on the status code (seen live on run 29507386876).
+// fail-safe keys on the status code (seen live in e2e).
 func TestIsNotImplemented(t *testing.T) {
 	versitygw501 := fmt.Errorf("operation error S3: GetBucketVersioning: %w",
 		&awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
