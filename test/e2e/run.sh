@@ -10,6 +10,10 @@
 # Inputs (env):
 #   IMPLEMENTATIONS    Comma-separated. Default: redpanda,versitygw,minio,fakegcs.
 #                      Each maps via $IMPL_DRIVER below to a driver.
+#   SCENARIOS          Optional comma-separated scenario directory
+#                      names (e.g. adoption,backend-stickiness) to run
+#                      instead of every scenario; for iterating on one
+#                      locally.
 #   CONTROLLER_IMAGE   Cluster-side image reference the deployment is
 #                      patched to before rollout. Required.
 #   OCI_DIR            Optional local OCI layout to push before applying.
@@ -302,6 +306,7 @@ for impl in "${impl_list[@]}"; do
   for scenario in "${scenario_list[@]}"; do
     [[ -z "$scenario" ]] && continue
     scenario_matches_impl "$scenario" "$impl" "$driver" || continue
+    [[ -z "${SCENARIOS:-}" || ",$SCENARIOS," == *",$(basename "$scenario"),"* ]] || continue
     if run_scenario "$scenario" "$impl" "$driver"; then
       results["$impl/$scenario"]=PASS
     else
