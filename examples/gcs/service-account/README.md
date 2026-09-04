@@ -71,7 +71,7 @@ kubectl -n <namespace> delete secret <credentialsSecretName>
 
 The controller reconciles the `BucketyAccess` on the Secret's
 deletion: it mints a fresh key into a new Secret and then revokes
-the previous key. Pods that
+the previous key, recording a `PrincipalReplaced` event. Pods that
 loaded the key once (a mounted file read at boot) keep using the
 revoked one until restarted, so restart them after the new Secret
 appears.
