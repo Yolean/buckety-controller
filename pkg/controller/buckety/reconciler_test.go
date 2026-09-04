@@ -3,8 +3,10 @@ package buckety
 import (
 	"context"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -524,5 +526,68 @@ func TestStaleAccessCacheIsHarmless(t *testing.T) {
 	}
 	if !blocked {
 		t.Errorf("BlockedByAccesses missing: %+v", cur.Status.Conditions)
+	}
+}
+
+// An in-progress answer is trusted for provisioningPatience and
+// no longer: a resource still "provisioning" minutes later is
+// stuck, and must get the failure posture (error with backoff,
+// Warning event) instead of a Normal event every 2s forever.
+func TestProvisioningOverdueBecomesFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, c := range []struct {
+		name  string
+		since time.Duration
+		fail  bool
+	}{
+		{"fresh", 10 * time.Second, false},
+		{"overdue", provisioningPatience + time.Minute, true},
+	} {
+		bky := &bucketyv1.Buckety{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "orders", Namespace: "t1",
+				Finalizers: []string{bucketyv1.FinalizerCleanup},
+			},
+			Spec: bucketyv1.BucketySpec{Backend: "be"},
+			Status: bucketyv1.BucketyStatus{
+				Backend: "be", Driver: "prov", BackendResourceName: "orders",
+				Conditions: []metav1.Condition{{
+					Type: "Ready", Status: metav1.ConditionFalse, Reason: "Provisioning",
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-c.since)),
+				}},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(bky).
+			WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+			Build()
+		r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{
+			Backends: map[string]config.Backend{"be": {Name: "be", Driver: &provisioningDriver{inProgress: true}}},
+		}}
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "t1", Name: "orders"}})
+		if c.fail && err == nil {
+			t.Errorf("%s: overdue provisioning did not surface as an error", c.name)
+		}
+		if !c.fail && (err != nil || res.RequeueAfter <= 0) {
+			t.Errorf("%s: err=%v res=%+v, want prompt requeue without error", c.name, err, res)
+		}
+		var got bucketyv1.Buckety
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "t1", Name: "orders"}, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := "Provisioning"
+		if c.fail {
+			want = "EnsureFailed"
+		}
+		if r := meta.FindStatusCondition(got.Status.Conditions, "Ready"); r == nil || r.Reason != want {
+			t.Errorf("%s: Ready condition %+v, want reason %s", c.name, r, want)
+		}
 	}
 }

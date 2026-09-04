@@ -290,12 +290,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Paused", "drift requires human resolution", bky.Generation)
 			return ctrl.Result{}, r.patchStatus(ctx, &bky, baseBky)
 		}
-		if registry.IsProvisioningInProgress(err) {
+		if registry.IsProvisioningInProgress(err) && !provisioningOverdue(baseBky.Status.Conditions) {
 			// The backend needs a moment, not a fix (freshly
 			// created SA awaiting IAM propagation): Normal event,
 			// prompt requeue - the DeletingContents posture, not
 			// the EnsureFailed one, whose Warning + backoff would
-			// misreport a merely-young resource as broken.
+			// misreport a merely-young resource as broken. Bounded
+			// by provisioningPatience: past it, the same answer IS
+			// a failure and gets the Warning + backoff below.
 			r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "Provisioning",
 				corev1.EventTypeNormal, "Provisioning", err.Error())
 			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "Provisioning", err.Error(), bky.Generation)
@@ -579,6 +581,22 @@ func (r *Reconciler) surfaceCondition(ctx context.Context, bky, base *bucketyv1.
 		corev1.EventTypeWarning, reason, message)
 	setCond(&bky.Status.Conditions, condType, status, reason, message, bky.Generation)
 	return ctrl.Result{}, r.patchStatus(ctx, bky, base)
+}
+
+// provisioningPatience bounds how long an ErrProvisioningInProgress
+// answer is taken at its word. IAM propagation takes seconds; a
+// resource still "provisioning" minutes later is stuck (an org
+// policy, a disabled account, a permission), and a Normal event
+// with a 2s requeue would hide that indefinitely while hammering
+// the backend.
+const provisioningPatience = 2 * time.Minute
+
+// provisioningOverdue reports whether Ready has carried the
+// Provisioning reason for longer than provisioningPatience.
+func provisioningOverdue(conds []metav1.Condition) bool {
+	c := meta.FindStatusCondition(conds, "Ready")
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == "Provisioning" &&
+		time.Since(c.LastTransitionTime.Time) > provisioningPatience
 }
 
 // decideProvenance is the adoption gate's pure core (SPEC
