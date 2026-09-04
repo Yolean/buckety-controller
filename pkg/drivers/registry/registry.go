@@ -155,9 +155,11 @@ type GrantRequest struct {
 	// retrievable at creation (GCS SA keys, HMAC secrets):
 	// GrantAccess runs on every reconcile and its result rewrites
 	// the Secret, so such a driver MUST return the existing data
-	// unchanged while it still verifies against the backend, and
-	// mint only when it is absent or invalid (which doubles as
-	// self-healing after out-of-band revocation).
+	// unchanged and mint only when it is absent or positively
+	// invalid. A changed Principal makes the reconciler revoke the
+	// previous one, which is irreversible - so "not found" from an
+	// eventually consistent backend listing is not grounds to
+	// mint: it is what a just-minted credential looks like.
 	ExistingSecretData map[string][]byte
 }
 

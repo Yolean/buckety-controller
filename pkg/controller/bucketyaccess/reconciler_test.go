@@ -2,6 +2,7 @@ package bucketyaccess
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -351,6 +352,7 @@ func TestReplacedPrincipalRevoked(t *testing.T) {
 		}
 		return bky, access
 	}
+	events := record.NewFakeRecorder(10)
 	run := func(t *testing.T, rec *grantRecorder) (client.Client, *bucketyv1.BucketyAccess, error) {
 		t.Helper()
 		bky, access := newObjs()
@@ -358,7 +360,7 @@ func TestReplacedPrincipalRevoked(t *testing.T) {
 			WithObjects(bky, access).
 			WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
 			Build()
-		r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{
+		r := &Reconciler{Client: cl, Scheme: scheme, Recorder: events, Config: &config.Loaded{
 			Backends: map[string]config.Backend{"be": {Name: "be", Driver: rec}},
 		}}
 		_, err := r.Reconcile(context.Background(), reconcilerRequest("t1", "reader"))
@@ -368,8 +370,30 @@ func TestReplacedPrincipalRevoked(t *testing.T) {
 		}
 		return cl, &got, err
 	}
+	drainEvents := func() []string {
+		var out []string
+		for {
+			select {
+			case e := <-events.Events:
+				out = append(out, e)
+			default:
+				return out
+			}
+		}
+	}
+	hasEvent := func(reason string) bool {
+		for _, e := range drainEvents() {
+			if strings.Contains(e, " "+reason+" ") {
+				return true
+			}
+		}
+		return false
+	}
 
-	// Principal change: old revoked, status advances.
+	// Principal change: old revoked, status advances, and the
+	// replacement is announced - it is otherwise invisible on a
+	// resource that stays Ready=True while consumers holding the
+	// old key are broken.
 	rec := &grantRecorder{
 		data:      map[string][]byte{"bucket": []byte("t1-orders")},
 		principal: "projects/p/serviceAccounts/x/keys/new",
@@ -384,8 +408,11 @@ func TestReplacedPrincipalRevoked(t *testing.T) {
 	if got.Status.Principal != "projects/p/serviceAccounts/x/keys/new" {
 		t.Errorf("principal: %q", got.Status.Principal)
 	}
+	if !hasEvent("PrincipalReplaced") {
+		t.Error("principal replacement emitted no PrincipalReplaced event")
+	}
 
-	// Unchanged principal: no revocation.
+	// Unchanged principal: no revocation, no announcement.
 	rec = &grantRecorder{
 		data:      map[string][]byte{"bucket": []byte("t1-orders")},
 		principal: "projects/p/serviceAccounts/x/keys/old",
@@ -395,6 +422,9 @@ func TestReplacedPrincipalRevoked(t *testing.T) {
 	}
 	if len(rec.revoked) != 0 {
 		t.Errorf("steady state revoked: %v", rec.revoked)
+	}
+	if hasEvent("PrincipalReplaced") {
+		t.Error("steady state emitted PrincipalReplaced")
 	}
 
 	// Revocation failure: reconcile errors and status.principal

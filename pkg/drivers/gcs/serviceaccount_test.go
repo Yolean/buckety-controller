@@ -38,6 +38,10 @@ type fakeGCP struct {
 	// bindForbidden with a 403.
 	bindRefusals  int
 	bindForbidden int
+	// unlisted key ids exist (Delete finds them) but are missing
+	// from keys.list: the eventually consistent listing lagging
+	// behind a create.
+	unlisted map[string]bool
 }
 
 type policyBinding struct {
@@ -53,6 +57,7 @@ func newFakeGCP(t *testing.T, project string) (*fakeGCP, *httptest.Server) {
 		keys:       map[string]map[string]*iam.ServiceAccountKey{},
 		policies:   map[string][]*policyBinding{},
 		tombstoned: map[string]bool{},
+		unlisted:   map[string]bool{},
 	}
 	mux := http.NewServeMux()
 
@@ -123,7 +128,10 @@ func newFakeGCP(t *testing.T, project string) (*fakeGCP, *httptest.Server) {
 			return
 		}
 		resp := iam.ListServiceAccountKeysResponse{}
-		for _, k := range f.keys[email] {
+		for id, k := range f.keys[email] {
+			if f.unlisted[id] {
+				continue
+			}
 			resp.Keys = append(resp.Keys, k)
 		}
 		writeJSON(w, resp)
@@ -464,24 +472,60 @@ func TestGrantAccessKeyLifecycle(t *testing.T) {
 		t.Fatalf("keys after steady-state grant: %d", n)
 	}
 
-	// Out-of-band revocation (also the manual rotation runbook):
-	// next grant self-heals with a fresh key.
+	// keys.list lagging behind the create (the second reconcile
+	// after a first mint runs within a second of it): absence from
+	// the listing is not evidence of revocation, so the key is
+	// reused and nothing is minted or replaced. This is the
+	// regression test for the first-provisioning double mint
+	// (ISSUE_first_provisioning_mints_two_keys_and_revokes_the_one_a_consumer_read.md).
 	f.mu.Lock()
-	delete(f.keys[email], keyID)
+	f.unlisted[keyID] = true
 	f.mu.Unlock()
 	res3, err := d.GrantAccess(ctx, req)
 	if err != nil {
-		t.Fatalf("post-revocation grant: %v", err)
+		t.Fatalf("grant during listing lag: %v", err)
 	}
-	if string(res3.SecretData["serviceAccountKeyId"]) == keyID {
-		t.Error("revoked key reused")
+	if res3.Principal != res1.Principal {
+		t.Errorf("listing lag re-minted: principal %q, want %q", res3.Principal, res1.Principal)
 	}
 	if n := len(f.keyIDs(email)); n != 1 {
-		t.Fatalf("keys after re-mint: %d", n)
+		t.Fatalf("keys after listing-lag grant: %d", n)
+	}
+	f.mu.Lock()
+	delete(f.unlisted, keyID)
+	f.mu.Unlock()
+
+	// Deleted server-side: indistinguishable from the lag above,
+	// so the Secret keeps the key. Rotation is a Secret deletion
+	// (next block), not a key deletion.
+	f.mu.Lock()
+	delete(f.keys[email], keyID)
+	f.mu.Unlock()
+	res3, err = d.GrantAccess(ctx, req)
+	if err != nil {
+		t.Fatalf("grant after server-side deletion: %v", err)
+	}
+	if res3.Principal != res1.Principal || len(f.keyIDs(email)) != 0 {
+		t.Errorf("server-side deletion re-minted: principal %q, keys %v", res3.Principal, f.keyIDs(email))
+	}
+
+	// Secret deleted (the rotation runbook): fresh key. The
+	// reconciler revokes the replaced principal once the new
+	// Secret is written (TestReplacedPrincipalRevoked).
+	req.ExistingSecretData = nil
+	res3, err = d.GrantAccess(ctx, req)
+	if err != nil {
+		t.Fatalf("grant after Secret deletion: %v", err)
+	}
+	if res3.Principal == res1.Principal {
+		t.Error("Secret deletion did not mint a fresh key")
+	}
+	if n := len(f.keyIDs(email)); n != 1 {
+		t.Fatalf("keys after rotation: %d", n)
 	}
 
 	// Expired key (org-policy iam.serviceAccountKeyExpiryHours):
-	// treated as invalid, re-minted.
+	// positive evidence from the listing, re-minted.
 	req.ExistingSecretData = res3.SecretData
 	f.mu.Lock()
 	f.keys[email][string(res3.SecretData["serviceAccountKeyId"])].ValidBeforeTime = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
@@ -495,20 +539,22 @@ func TestGrantAccessKeyLifecycle(t *testing.T) {
 	}
 
 	// A key file for some OTHER identity in the Secret (email
-	// mismatch) is never trusted.
-	req.ExistingSecretData = map[string][]byte{
-		"serviceAccountKey": []byte(`{"type":"service_account","client_email":"other@id-proj.iam.gserviceaccount.com","private_key_id":"keyX"}`),
-	}
-	res5, err := d.GrantAccess(ctx, req)
-	if err != nil {
-		t.Fatalf("mismatched-email grant: %v", err)
-	}
-	var got struct {
-		ClientEmail string `json:"client_email"`
-	}
-	_ = json.Unmarshal(res5.SecretData["serviceAccountKey"], &got)
-	if got.ClientEmail != email {
-		t.Errorf("mismatched-email grant kept foreign key: %q", got.ClientEmail)
+	// mismatch), or one that does not parse, is never trusted.
+	for name, raw := range map[string]string{
+		"foreign email": `{"type":"service_account","client_email":"other@id-proj.iam.gserviceaccount.com","private_key_id":"keyX"}`,
+		"garbage":       `not json`,
+	} {
+		req.ExistingSecretData = map[string][]byte{"serviceAccountKey": []byte(raw)}
+		res5, err := d.GrantAccess(ctx, req)
+		if err != nil {
+			t.Fatalf("%s grant: %v", name, err)
+		}
+		var got struct {
+			ClientEmail string `json:"client_email"`
+		}
+		if json.Unmarshal(res5.SecretData["serviceAccountKey"], &got) != nil || got.ClientEmail != email {
+			t.Errorf("%s grant kept the Secret's key: %s", name, res5.SecretData["serviceAccountKey"])
+		}
 	}
 }
 

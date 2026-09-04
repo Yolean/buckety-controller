@@ -816,12 +816,18 @@ one user-managed key for it — native GCS auth with bucket-scoped
 blast radius, alongside the (still backend-wide) HMAC pair. The
 create-only-retrievable-key problem that deferred per-access
 minting is solved by `GrantRequest.ExistingSecretData`: GrantAccess
-returns the Secret's current key unchanged while it still verifies
-against `keys.list`, and mints only when the key is absent, revoked
-out of band, or expired — which makes server-side key deletion the
-manual rotation runbook. `status.principal` is the key's full
-resource name and `RevokeAccess` deletes it, so BucketyAccess
-deletion performs real revocation for these Secrets.
+returns the Secret's current key unchanged, and mints only when
+the Secret has none or the key is positively unusable (expired
+per `keys.list`, or not this SA's). Absence from `keys.list` is
+deliberately NOT a mint trigger: the listing is eventually
+consistent and misses a key minted a second earlier, which is
+when the follow-up reconcile runs - and a mint revokes the
+replaced key, so it must rest on evidence rather than on a
+missing entry. The manual rotation runbook is therefore to delete
+the Secret: the next reconcile mints a fresh key and revokes the
+previous one. `status.principal` is the key's full resource name
+and `RevokeAccess` deletes it, so BucketyAccess deletion performs
+real revocation for these Secrets.
 
 The `serviceAccounts.project` SHOULD be a dedicated identity
 project, separate from the bucket project: key creation equals
@@ -1186,8 +1192,8 @@ and the corresponding GHA secret.
   machinery is already rotation-shaped, and scheduled key
   rotation (mint new, overlap one period, garbage-collect the
   previous key) is the planned follow-up; until then rotation is
-  operator-driven - delete the key server-side and the next
-  reconcile re-mints (`gcloud iam service-accounts keys delete`).
+  operator-driven - delete the access Secret and the next
+  reconcile mints a fresh key and revokes the previous one.
 - Multi-cluster federation.
 - Admission webhook for cross-resource invariants. Per-resource
   parameter validation (against per-driver schemas) and

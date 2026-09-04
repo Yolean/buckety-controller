@@ -361,6 +361,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			_ = r.patchStatus(ctx, &access, baseAccess)
 			return ctrl.Result{}, rerr
 		}
+		// A replaced credential is invisible from the resource
+		// otherwise: Ready stays True and the Secret looks fine,
+		// while a consumer that loaded the old key once is now
+		// broken. The event is what tells an operator to restart
+		// such consumers, or that an unrequested rotation happened.
+		if r.Recorder != nil {
+			r.Recorder.Event(&access, corev1.EventTypeNormal, "PrincipalReplaced",
+				fmt.Sprintf("credential re-minted: %q revoked, secret %q now carries %q; restart consumers that loaded the secret once", old, access.Spec.CredentialsSecretName, res.Principal))
+		}
 	}
 	access.Status.Principal = res.Principal
 	access.Status.PrincipalRevocable = res.Revocable

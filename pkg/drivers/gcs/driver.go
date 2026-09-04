@@ -36,11 +36,13 @@
 // serviceAccountKeyId alongside the static HMAC pair. Keys are
 // only retrievable at creation, so GrantAccess - which runs on
 // every reconcile and rewrites the Secret from its result - reuses
-// the key found in GrantRequest.ExistingSecretData while it still
-// verifies against keys.list, and mints only when absent, revoked
-// out of band, or expired. Scheduled key rotation is a roadmap
-// item (SPEC §Roadmap); until then rotation is operator-driven:
-// delete the key server-side and the next reconcile re-mints.
+// the key found in GrantRequest.ExistingSecretData, and mints only
+// when the Secret has none or the key is positively unusable
+// (expired per keys.list, or not this SA's); see ensureAccessKey
+// for why absence from keys.list does not count. Scheduled key
+// rotation is a roadmap item (SPEC §Roadmap); until then rotation
+// is operator-driven: delete the Secret and the next reconcile
+// mints a fresh key and revokes the previous one.
 //
 // The serviceAccounts config names the GCP project the SAs live
 // in. A DEDICATED identity project (separate from the bucket
