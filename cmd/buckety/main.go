@@ -157,12 +157,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if enableWebhook {
-		(&bkhook.Validator{Config: loaded}).Register(mgr)
-	} else {
-		setupLog.Info("webhook disabled; per-driver parameter validation will surface on resource status only")
-	}
-
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		setupLog.Error(err, "healthz registration failed")
 		os.Exit(1)
@@ -170,6 +164,21 @@ func main() {
 	if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
 		setupLog.Error(err, "readyz registration failed")
 		os.Exit(1)
+	}
+	if enableWebhook {
+		(&bkhook.Validator{Config: loaded}).Register(mgr)
+		// Ready only once the webhook listener answers. The
+		// ValidatingWebhookConfiguration has failurePolicy Fail, so
+		// a Pod that is Ready - and therefore in the Service's
+		// endpoints - before its TLS listener is up makes every
+		// Buckety apply during a rollout fail with "failed calling
+		// webhook".
+		if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			setupLog.Error(err, "webhook readyz registration failed")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("webhook disabled; per-driver parameter validation will surface on resource status only")
 	}
 
 	setupLog.Info("starting", "version", version, "drivers", registry.Versions())
