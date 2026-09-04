@@ -528,7 +528,7 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 	if region != "" {
 		data["region"] = []byte(region)
 	}
-	principal, revocable := "gcs-static", false
+	principal, revocable, minted := "gcs-static", false, false
 	if sa := req.BucketyParameters["serviceAccount"]; sa != "" {
 		if d.iamsvc == nil {
 			// Validation rejects the parameter on non-enabled
@@ -538,7 +538,7 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 			return registry.GrantResult{}, fmt.Errorf("gcs: bucket %q declares parameters.serviceAccount but this backend has serviceAccounts disabled", req.BucketyName)
 		}
 		email := d.saEmail(sa)
-		keyJSON, keyID, err := d.ensureAccessKey(ctx, email, req.ExistingSecretData)
+		keyJSON, keyID, fresh, err := d.ensureAccessKey(ctx, email, req.BucketyName, req.ExistingSecretData)
 		if err != nil {
 			return registry.GrantResult{}, err
 		}
@@ -546,13 +546,14 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 		data["serviceAccountEmail"] = []byte(email)
 		data["serviceAccountKeyId"] = []byte(keyID)
 		principal = d.saResource(email) + "/keys/" + keyID
-		revocable = true
+		revocable, minted = true, fresh
 	}
 	return registry.GrantResult{
 		SecretData: data,
 		Principal:  principal,
 		Scoped:     false,
 		Revocable:  revocable,
+		Minted:     minted,
 	}, nil
 }
 

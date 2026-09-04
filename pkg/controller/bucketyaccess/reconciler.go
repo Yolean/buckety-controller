@@ -326,6 +326,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// pre-label Secrets into the scoped cache.
 	err = r.writeSecret(ctx, &access, &existing, apierrors.IsNotFound(getErr), res.SecretData)
 	if err != nil {
+		// A credential minted in this pass and not written anywhere
+		// is held by nobody and recorded nowhere: status.principal
+		// still names its predecessor, so neither a retry (which
+		// reuses the Secret's key) nor deletion (which revokes the
+		// recorded principal) would ever reach it. Revoke it now;
+		// the retry mints again. Best effort - a failure here is
+		// logged, and the write error is what the status carries.
+		if res.Minted && res.Revocable {
+			if rerr := backend.Driver.RevokeAccess(ctx, res.Principal); rerr != nil {
+				log.Error(rerr, "revoking the credential minted for a failed secret write", "principal", res.Principal)
+			}
+		}
 		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
 			// The namespace is going away and will take this
 			// BucketyAccess with it; retrying with backoff only

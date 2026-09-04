@@ -808,3 +808,52 @@ func TestBindPropagationWindow(t *testing.T) {
 		t.Errorf("403 handling: %v", err)
 	}
 }
+
+// Minting is the impersonation-shaped step, so it checks the
+// ownership marker itself rather than trusting that the Buckety
+// reconciler accepted the SA earlier (a stale Ready status plus a
+// changed parameters.serviceAccount reaches here with the webhook
+// disabled). The result also reports whether a key was created.
+func TestGrantAccessRefusesForeignServiceAccount(t *testing.T) {
+	f, srv := newFakeGCP(t, "id-proj")
+	d := saDriver(t, srv)
+	ctx := context.Background()
+	f.mu.Lock()
+	f.sas["victim@id-proj.iam.gserviceaccount.com"] = &iam.ServiceAccount{
+		Email: "victim@id-proj.iam.gserviceaccount.com", Description: "hand-made",
+	}
+	f.mu.Unlock()
+	if err := d.ensureServiceAccount(ctx, "orders-t1", "bucket-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct{ sa, bucket string }{
+		{"victim", "bucket-x"},    // no marker at all
+		{"orders-t1", "bucket-y"}, // marker for another bucket
+	} {
+		_, err := d.GrantAccess(ctx, registry.GrantRequest{
+			BucketyName:       c.bucket,
+			BucketyParameters: map[string]string{"serviceAccount": c.sa},
+		})
+		if err == nil || !strings.Contains(err.Error(), "refusing") {
+			t.Errorf("grant for %s on %s: %v", c.sa, c.bucket, err)
+		}
+		if n := len(f.keyIDs(d.saEmail(c.sa))); n != 0 {
+			t.Errorf("grant for %s on %s minted %d keys", c.sa, c.bucket, n)
+		}
+	}
+
+	// The owned SA mints, and says so; the reuse path does not.
+	req := registry.GrantRequest{BucketyName: "bucket-x", BucketyParameters: map[string]string{"serviceAccount": "orders-t1"}}
+	res, err := d.GrantAccess(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Minted {
+		t.Error("first grant did not report Minted")
+	}
+	req.ExistingSecretData = res.SecretData
+	if res, err = d.GrantAccess(ctx, req); err != nil || res.Minted {
+		t.Errorf("reuse reported Minted=%v, err=%v", res.Minted, err)
+	}
+}
