@@ -10,14 +10,16 @@ bootstrap="$(secret_value drift-topic bootstrap)"
 # directly poke retention.ms=1 on the broker, then wait for the
 # controller's next periodic re-check to restore it.
 log "out-of-band: setting retention.ms=1 directly on broker"
-kcg run -n "${E2E_KAFKA_NAMESPACE:-redpanda}" --rm -i --restart=Never --quiet \
+kc run --rm -i --restart=Never --quiet \
   --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
   "rpk-oob-set-$RANDOM" -- \
   topic alter-config "$topic_name" --set retention.ms=1 --brokers "$bootstrap"
 
 log "expecting controller to reconcile retention.ms back to 3600000"
-for _ in $(seq 1 60); do
-  current="$(kcg run -n "${E2E_KAFKA_NAMESPACE:-redpanda}" --rm -i --restart=Never --quiet \
+deadline=$(( $(date +%s) + 90 ))
+current=""
+while (( $(date +%s) < deadline )); do
+  current="$(kc run --rm -i --restart=Never --quiet \
     --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
     "rpk-oob-check-$RANDOM" -- \
     topic describe -c "$topic_name" --brokers "$bootstrap" 2>/dev/null \
@@ -26,13 +28,15 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 [[ "$current" == "3600000" ]] \
-  || fail "controller did not reapply retention.ms=3600000 (broker reports $current)"
+  || fail "controller did not reapply retention.ms=3600000 within 90s (broker reports $current)"
 
-# Spec-level unsafe change. Reduce partitions in the spec; the
-# driver cannot shrink Kafka partitions in place, so surfaces
-# ParameterDrift instead of attempting destructive action.
-log "spec change: reducing partitions from 3 to 2 (unsafe)"
-kc patch buckety/drift --type=merge -p '{"spec":{"parameters":{"partitions":"2"}}}'
+# Out-of-band unreconcilable change: grow the partition count on
+# the broker. Kafka cannot shrink partitions, so the spec's 3 can
+# never be re-applied; the controller surfaces ParameterDrift and
+# waits for a human instead of attempting anything destructive.
+log "out-of-band: adding 2 partitions on the broker (3 -> 5)"
+rpk_run oob-parts topic add-partitions "$topic_name" --num 2 --brokers "$bootstrap" </dev/null \
+  || fail "could not add partitions out of band"
 
 wait_condition buckety/drift ParameterDrift True 90s
 [[ "$(condition_status buckety/drift Ready)" == "False" ]] \
