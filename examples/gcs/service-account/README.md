@@ -66,13 +66,23 @@ block this feature by design; the grant fails with an actionable
 ## Rotation (manual, until scheduled rotation lands)
 
 ```
-gcloud iam service-accounts keys delete <serviceAccountKeyId> \
-  --iam-account=<serviceAccountEmail>
+kubectl -n <namespace> delete secret <credentialsSecretName>
 ```
 
-The next reconcile (within the requeue cadence) detects the
-revoked key via `keys.list` and mints a fresh one into the Secret
-in place. Deleting the `BucketyAccess` revokes its key
-(`status.principal` is the key's resource name); deleting the
-`Buckety` with `retentionPolicy=Delete` removes the service
-account with the bucket.
+The controller reconciles the `BucketyAccess` on the Secret's
+deletion: it mints a fresh key into a new Secret and then revokes
+the previous key. Pods that
+loaded the key once (a mounted file read at boot) keep using the
+revoked one until restarted, so restart them after the new Secret
+appears.
+
+Deleting the key server-side instead (`gcloud iam service-accounts
+keys delete`) does NOT trigger a re-mint: the controller cannot
+tell a deleted key from one that `keys.list` has not caught up
+with yet, and it never replaces a key on missing evidence. Delete
+the Secret afterwards to re-mint.
+
+Deleting the `BucketyAccess` revokes its key (`status.principal`
+is the key's resource name); deleting the `Buckety` with
+`retentionPolicy=Delete` removes the service account with the
+bucket.

@@ -165,14 +165,27 @@ func isMemberNotPropagated(err error) bool {
 	return gapiCode(err, 400) && strings.Contains(err.Error(), "does not exist")
 }
 
-// ensureAccessKey returns the access's SA key JSON and key id,
-// reusing the key carried in the existing Secret while it still
-// verifies against the backend. The private material is only
-// retrievable at creation, so reuse is what makes GrantAccess
-// idempotent; the keys.list check is what makes it self-healing
-// (out-of-band revocation -> fresh key on the next reconcile,
-// which is also the documented manual rotation runbook until
-// scheduled rotation lands).
+// ensureAccessKey returns the access's SA key JSON and key id.
+// The private material is only retrievable at creation, so the
+// key carried in the existing Secret is reused, and a re-mint
+// happens only on POSITIVE evidence that it is unusable: the JSON
+// does not parse, it names another identity, or keys.list shows
+// it expired (constraints/iam.serviceAccountKeyExpiryHours).
+//
+// Absence from keys.list is NOT such evidence. The listing is
+// eventually consistent, and a key created a second earlier is
+// routinely missing from it - which is exactly when the second
+// reconcile runs, since the Secret write and the status patch of
+// the first one both re-enqueue the access. Reading absence as
+// "revoked out of band" made that second reconcile mint a
+// replacement and revoke the key a consumer had just read from
+// the Secret (11 of 19 first provisionings in one project;
+// ISSUE_first_provisioning_mints_two_keys_and_revokes_the_one_a_consumer_read.md).
+// A revoke is irreversible, so it needs evidence, not the lack of
+// it. The cost is that a key deleted server-side is no longer
+// replaced on its own; rotation is triggered by deleting the
+// Secret instead, which mints a fresh key and (in the reconciler)
+// revokes the previous one.
 func (d *Driver) ensureAccessKey(ctx context.Context, email string, existing map[string][]byte) ([]byte, string, error) {
 	resource := d.saResource(email)
 	if raw, ok := existing["serviceAccountKey"]; ok {
@@ -185,17 +198,22 @@ func (d *Driver) ensureAccessKey(ctx context.Context, email string, existing map
 			if err != nil {
 				return nil, "", fmt.Errorf("gcs: list keys of %q: %w", email, err)
 			}
+			expired := false
 			for _, key := range resp.Keys {
-				if strings.HasSuffix(key.Name, "/keys/"+k.PrivateKeyID) && !keyExpired(key) {
-					return raw, k.PrivateKeyID, nil
+				if strings.HasSuffix(key.Name, "/keys/"+k.PrivateKeyID) {
+					expired = keyExpired(key)
+					break
 				}
 			}
+			if !expired {
+				return raw, k.PrivateKeyID, nil
+			}
 		}
-		// Mismatched email, revoked out of band, or expired
-		// (constraints/iam.serviceAccountKeyExpiryHours): mint
-		// fresh. The one key each access holds means nothing else
-		// needs garbage collection; GCP caps user-managed keys at
-		// 10 per SA, bounding accesses per bucket accordingly.
+		// Unparseable, mismatched email, or expired: mint fresh.
+		// The reconciler revokes the replaced key once the Secret
+		// carries its successor, so each access holds one key; GCP
+		// caps user-managed keys at 10 per SA, bounding accesses
+		// per bucket accordingly.
 	}
 	key, err := d.iamsvc.Projects.ServiceAccounts.Keys.Create(resource, &iam.CreateServiceAccountKeyRequest{}).Context(ctx).Do()
 	if err != nil {
