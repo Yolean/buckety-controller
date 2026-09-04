@@ -35,6 +35,11 @@ export KUBECONFIG
 kc() { kubectl -n "$E2E_NAMESPACE" "$@"; }
 kcg() { kubectl "$@"; }
 
+# Images the helper pods run. Pinned like everything else the
+# suite pulls: a floating tag flakes every helper at once when the
+# upstream image changes.
+AWSCLI_IMAGE="public.ecr.aws/aws-cli/aws-cli:2.36.39@sha256:df8b292f3ae0092a2861eb4ad37f46d755ffd082615f99bb404bb0d118e6e1f1"
+
 log() { printf '[assert] %s\n' "$*" >&2; }
 fail() { printf '[assert][FAIL] %s\n' "$*" >&2; exit 1; }
 
@@ -79,7 +84,7 @@ rpk_topic_list() {
   local bootstrap="${2:-${E2E_KAFKA_BOOTSTRAP:-redpanda.${kns}.svc.cluster.local:9093}}"
   # ghcr.io/yolean/redpanda's ENTRYPOINT is rpk; pass args
   # without the leading `rpk` to avoid `rpk rpk topic ...`.
-  kcg run -n "$kns" --rm -i --restart=Never --quiet \
+  kc run --rm -i --restart=Never --quiet \
     --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
     "rpk-check-$RANDOM" -- \
     topic list --brokers "$bootstrap" </dev/null 2>&1
@@ -152,8 +157,7 @@ rollout_restart() {
 rpk_run() {
   local prefix="$1"
   shift
-  local kns="${E2E_KAFKA_NAMESPACE:-redpanda}"
-  kcg run -n "$kns" --rm -i --restart=Never --quiet \
+  kc run --rm -i --restart=Never --quiet \
     --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
     "rpk-${prefix}-$RANDOM" -- \
     "$@" 2>&1
@@ -189,8 +193,8 @@ s3_bucket_exists() {
   local bucket="$1" endpoint="$2" access="$3" secret="$4"
   log "verifying S3 bucket '$bucket' at $endpoint"
   local out
-  if ! out="$(kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
-      --image=public.ecr.aws/aws-cli/aws-cli:latest \
+  if ! out="$(kc run --rm -i --restart=Never --quiet \
+      --image="$AWSCLI_IMAGE" \
       --env="AWS_ACCESS_KEY_ID=$access" \
       --env="AWS_SECRET_ACCESS_KEY=$secret" \
       "awscli-check-$RANDOM" -- \
@@ -206,8 +210,8 @@ s3_bucket_exists() {
 s3_api() {
   local endpoint="$1" access="$2" secret="$3"
   shift 3
-  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
-    --image=public.ecr.aws/aws-cli/aws-cli:latest \
+  kc run --rm -i --restart=Never --quiet \
+    --image="$AWSCLI_IMAGE" \
     --env="AWS_ACCESS_KEY_ID=$access" \
     --env="AWS_SECRET_ACCESS_KEY=$secret" \
     "awscli-api-$RANDOM" -- \
@@ -286,7 +290,7 @@ resource_absent() {
 # values are bare hosts (schemes are the consumer's choice);
 # these emulator-coupled helpers speak plain http.
 gcs_api() {
-  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+  kc run --rm -i --restart=Never --quiet \
     --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
     "curl-check-$RANDOM" -- \
     -sfS "$1" </dev/null 2>&1
@@ -315,7 +319,7 @@ gcs_bucket_exists_quiet() {
 # Deletes the bucket directly (out-of-band mutation).
 gcs_bucket_delete() {
   local bucket="$1" endpoint="$2"
-  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+  kc run --rm -i --restart=Never --quiet \
     --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
     "curl-oob-$RANDOM" -- \
     -sfS -X DELETE "http://$endpoint/storage/v1/b/$bucket" </dev/null
@@ -363,7 +367,7 @@ gcs_object_exists() {
 # the JSON API wants slashes percent-encoded in the object path.
 gcs_object_delete() {
   local bucket="$1" endpoint="$2" key="$3"
-  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+  kc run --rm -i --restart=Never --quiet \
     --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
     "curl-rmobj-$RANDOM" -- \
     -sfS -o /dev/null -X DELETE \
@@ -375,7 +379,7 @@ gcs_object_delete() {
 # Creates the bucket directly via the JSON API (out-of-band).
 gcs_bucket_create() {
   local bucket="$1" endpoint="$2" project="${3:-e2e-project}"
-  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+  kc run --rm -i --restart=Never --quiet \
     --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
     "curl-mkbucket-$RANDOM" -- \
     -sfS -o /dev/null -X POST \
@@ -389,11 +393,186 @@ gcs_bucket_create() {
 # Uploads via the JSON API (unauthenticated emulator).
 gcs_object_put() {
   local bucket="$1" endpoint="$2" key="$3" content="$4"
-  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
+  kc run --rm -i --restart=Never --quiet \
     --image=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 \
     "curl-put-$RANDOM" -- \
     -sfS -o /dev/null -X POST \
     -H "Content-Type: text/plain" \
     --data-raw "$content" \
     "http://$endpoint/upload/storage/v1/b/$bucket/o?uploadType=media&name=$key" </dev/null
+}
+
+# ---- controller lifecycle helpers ----
+
+# controller_config_apply <file>
+# Installs <file> as the controller config Secret and restarts the
+# controller - the operation a platform performs on a config
+# change. Scenarios that swap the config trap
+# controller_config_restore so later scenarios see the original.
+controller_config_apply() {
+  kcg -n "$E2E_CONTROLLER_NS" create secret generic buckety-controller-config \
+    --from-file=buckety-controller.yaml="$1" \
+    --dry-run=client -o yaml | kcg apply -f -
+  rollout_restart deploy/buckety-controller
+  kcg -n "$E2E_CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
+}
+
+controller_config_restore() {
+  log "restoring original controller config"
+  controller_config_apply "${E2E_ORIGINAL_CONFIG:?harness must set E2E_ORIGINAL_CONFIG}"
+}
+
+# controller_set_image <image>
+controller_set_image() {
+  log "switching controller image to $1"
+  kcg -n "$E2E_CONTROLLER_NS" set image deploy/buckety-controller "controller=$1"
+  kcg -n "$E2E_CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
+}
+
+# ---- shared scenario bodies ----
+#
+# Some scenarios exercise controller behaviour that does not
+# depend on the driver, and their assert.sh files were
+# byte-identical across drivers apart from a name or a key list.
+# Their bodies live here so a fix lands once; each
+# examples/<driver>/<scenario>/assert.sh stays runnable on its
+# own and reads as the one-line statement of what it asserts.
+
+# backend_stickiness_scenario <backend> <renamed-buckety.yaml>
+# SPEC §End-to-end coverage #7. buckety/sticky-orig was applied
+# against <backend>; the harness's E2E_RENAMED_CONFIG declares
+# <backend>-renamed instead, and <renamed-buckety.yaml> targets it.
+backend_stickiness_scenario() {
+  local backend="$1" renamed_cr="$2"
+  : "${E2E_RENAMED_CONFIG:?harness must set E2E_RENAMED_CONFIG (a config declaring '${backend}-renamed' instead of '${backend}')}"
+  : "${E2E_ORIGINAL_CONFIG:?harness must set E2E_ORIGINAL_CONFIG}"
+
+  wait_ready buckety/sticky-orig 120s
+  local sticky_backend
+  sticky_backend="$(kc get buckety/sticky-orig -o jsonpath='{.status.backend}')"
+  [[ "$sticky_backend" == "$backend" ]] \
+    || fail "status.backend stamped as '$sticky_backend', expected '$backend'"
+
+  trap controller_config_restore EXIT
+  log "swapping controller config: $backend -> $backend-renamed"
+  controller_config_apply "$E2E_RENAMED_CONFIG"
+
+  wait_condition buckety/sticky-orig BackendUnavailable True 90s
+  [[ "$(condition_status buckety/sticky-orig Ready)" == "False" ]] \
+    || fail "sticky-orig Ready should be False under BackendUnavailable"
+  local still_sticky
+  still_sticky="$(kc get buckety/sticky-orig -o jsonpath='{.status.backend}')"
+  [[ "$still_sticky" == "$backend" ]] \
+    || fail "status.backend mutated to '$still_sticky'; stickiness violated"
+
+  # A fresh Buckety against the renamed backend still works.
+  log "applying new Buckety against $backend-renamed"
+  kc apply -f "$renamed_cr"
+  wait_ready buckety/sticky-new 120s
+
+  # Deletion with retentionPolicy=Delete blocks while the backend
+  # is missing: removing the finalizer would silently orphan the
+  # backend resource.
+  log "deleting sticky-orig while its backend is missing; expecting the deletion to block"
+  kc delete buckety/sticky-orig --wait=false
+  local blocked=""
+  for _ in $(seq 1 20); do
+    blocked="$(kc get buckety/sticky-orig \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)"
+    [[ "$blocked" == *"deletion blocked"* ]] && break
+    sleep 3
+  done
+  [[ "$blocked" == *"deletion blocked"* ]] \
+    || fail "sticky-orig deletion did not surface 'deletion blocked' (Ready message: '$blocked')"
+  kc get buckety/sticky-orig >/dev/null 2>&1 \
+    || fail "sticky-orig disappeared while its backend was missing; the backend resource would be orphaned"
+
+  # Restoring the backend unblocks the deletion.
+  controller_config_restore
+  kc wait --for=delete buckety/sticky-orig --timeout=90s \
+    || fail "sticky-orig deletion did not complete after the backend was restored"
+
+  log "backend-stickiness PASS"
+}
+
+# misconfigured_startup_scenario <scenario-dir>
+# SPEC §End-to-end coverage #10. Every <dir>/broken-configs/<file>
+# listed in <dir>/expectations.txt is installed as the controller
+# config; the controller MUST refuse to start with a log line
+# matching the listed regex.
+misconfigured_startup_scenario() {
+  local dir="$1" broken_dir="$1/broken-configs" expectations="$1/expectations.txt"
+  : "${E2E_ORIGINAL_CONFIG:?harness must set E2E_ORIGINAL_CONFIG}"
+  trap controller_config_restore EXIT
+
+  local variant regex file
+  while read -r variant regex; do
+    [[ "$variant" =~ ^# ]] && continue
+    [[ -z "$variant" ]] && continue
+    file="$broken_dir/$variant"
+    [[ -f "$file" ]] || fail "broken-config variant not found: $file"
+
+    log "applying broken config: $variant (expect regex: /$regex/)"
+    kcg -n "$E2E_CONTROLLER_NS" create secret generic buckety-controller-config \
+      --from-file=buckety-controller.yaml="$file" \
+      --dry-run=client -o yaml | kcg apply -f -
+    rollout_restart deploy/buckety-controller
+
+    # Wait until ANY pod's logs (current or previous container)
+    # carry the expected regex. During a rollout there can be two
+    # pods (old + new); after the new one has crashed once it lands
+    # in CrashLoopBackOff and the message is in either log stream.
+    local deadline=$(( $(date +%s) + 90 )) matched=0 pods pod arg
+    while (( $(date +%s) < deadline )); do
+      pods=$(kcg -n "$E2E_CONTROLLER_NS" get pods \
+        -l app.kubernetes.io/name=buckety-controller \
+        -o jsonpath='{range .items[*]}{.metadata.name} {end}' 2>/dev/null || true)
+      for pod in $pods; do
+        for arg in "" "--previous"; do
+          if kcg -n "$E2E_CONTROLLER_NS" logs "$pod" $arg 2>/dev/null \
+              | grep -E "$regex" >/dev/null 2>&1; then
+            matched=1; break 3
+          fi
+        done
+      done
+      sleep 2
+    done
+    if (( matched == 0 )); then
+      log "------ controller logs ($variant) ------"
+      kcg -n "$E2E_CONTROLLER_NS" logs -l app.kubernetes.io/name=buckety-controller \
+        --tail=200 --previous 2>/dev/null || true
+      fail "variant '$variant' did not produce log matching /$regex/"
+    fi
+  done < "$expectations"
+
+  log "misconfigured-startup PASS"
+}
+
+# scaled_to_zero_scenario <buckety> <secret> <job-file> <job-name> <secret-keys...>
+# SPEC §End-to-end coverage #5. The consumer Job in <job-file>
+# round-trips through the backend using only the Secret, with the
+# controller scaled to zero.
+scaled_to_zero_scenario() {
+  local bky="$1" secret="$2" job_file="$3" job="$4"
+  shift 4
+  wait_ready "buckety/$bky" 120s
+  secret_has_keys "$secret" "$@"
+
+  log "scaling buckety-controller to 0 in $E2E_CONTROLLER_NS"
+  kcg -n "$E2E_CONTROLLER_NS" scale deploy/buckety-controller --replicas=0
+  kcg -n "$E2E_CONTROLLER_NS" wait --for=delete pod \
+    -l app.kubernetes.io/name=buckety-controller --timeout=60s
+
+  log "applying consumer Job (operator is down)"
+  kc apply -f "$job_file"
+  kc wait --for=condition=Complete --timeout=120s "job/$job" \
+    || { kc logs "job/$job" >&2 || true; fail "roundtrip Job failed while operator was scaled to 0"; }
+
+  # Restore replica count so subsequent scenarios see a running
+  # controller.
+  log "restoring buckety-controller to 1"
+  kcg -n "$E2E_CONTROLLER_NS" scale deploy/buckety-controller --replicas=1
+  kcg -n "$E2E_CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
+
+  log "scaled-to-zero PASS"
 }

@@ -34,7 +34,7 @@ log "checking broker for retention.ms=3600000 on topic '$topic_name'"
 bootstrap="$(secret_value cfg-mut-topic bootstrap)"
 broker_retention=""
 for _ in $(seq 1 12); do
-  broker_retention="$(kcg run -n "${E2E_KAFKA_NAMESPACE:-redpanda}" --rm -i --restart=Never --quiet \
+  broker_retention="$(kc run --rm -i --restart=Never --quiet \
     --image=ghcr.io/yolean/redpanda:v24.2.22@sha256:5132085d4fe35b0fd6ddedc7f0fe3d3ba7be12c5e3829e1a2b986cd41b1d3538 \
     "rpk-cfgcheck-$RANDOM" -- \
     topic describe -c "$topic_name" --brokers "$bootstrap" 2>/dev/null \
