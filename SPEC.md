@@ -261,7 +261,7 @@ spec:
   bucketyRef:
     name: orders
   credentialsSecretName: orders-reader
-  role: ReadOnly
+  role: Reader
   parameters:
     consumerGroupPrefix: "tenant1-orders-reporting-"
 
@@ -278,7 +278,7 @@ credentials drawn from the backend's root config. The CRD shape
 already supports per-access scoping for v1alpha2 — drivers are
 expected to ignore role/parameter values they don't yet
 implement and surface a `ScopingNotImplemented` condition rather
-than silently treating ReadOnly as ReadWrite.
+than silently treating Reader as ReadWrite.
 
 ## Implicit access (`defaultAccess`)
 
@@ -377,8 +377,8 @@ creation. Audit the fleet before adding one.
 
 Each driver carries a SemVer (`major.minor.patch`) advertised by
 the compiled binary (typically injected at build time via
-`-ldflags '-X main.driverVersion=...'`; see *Build and
-distribution*). At first reconcile the resource's
+`-ldflags '-X github.com/Yolean/buckety-controller/pkg/drivers/<driver>.version=...'`;
+see *Build and distribution*). At first reconcile the resource's
 `status.driverMajor` is stamped from this version and is
 **sticky** thereafter, exactly like `status.backend`. The full
 running version is mirrored to `status.driverBuildVersion` on
@@ -644,10 +644,12 @@ call, guided by the chosen operator SDK.
   Idempotent for the same `(Buckety, BucketyAccess)` pair.
 - `RevokeAccess` — removes the backend-side principal (no-op in
   v1alpha1), idempotent on NotFound.
-- `ValidateParameters` — used by the admission webhook; returns
-  a per-key error map.
-- `Version()` — returns the driver's SemVer for
-  `status.driverVersion` stamping.
+- `ValidateParameters` — used by the admission webhook and, with
+  the webhook disabled, by the reconciler; returns an error
+  naming the offending key.
+- `Version()` — returns the driver's SemVer, from which
+  `status.driverMajor` (sticky) and `status.driverBuildVersion`
+  are stamped.
 - Driver also exposes its OpenAPI schemas separately (see
   Schemas).
 
@@ -667,13 +669,21 @@ specified:
   (Kafka partition count can grow but not shrink), the driver
   surfaces `ParameterDrift` and waits for human resolution.
 - `status.observedGeneration` advances when `metadata.generation`
-  has been fully reconciled, including downstream Secret state
-  (not just the backend resource). Until then,
-  `status.observedGeneration` lags `metadata.generation` and
-  `Ready=False`.
-- The controller MUST be honest in `status.conditions`:
-  `Ready=False` until both the backend resource AND any
-  access-side Secrets are in sync.
+  has been fully reconciled. Until then it lags
+  `metadata.generation` and `Ready=False`.
+- The controller MUST be honest in `status.conditions`. A
+  `Buckety` is `Ready` when its backend resource matches the spec
+  and its implicit access (if any) has been materialised; the
+  access-side Secret has its own `Ready` on the `BucketyAccess`.
+  The two cannot depend on each other: an access waits for its
+  `Buckety` to be `Ready` before minting, so a `Buckety` that
+  waited for the Secret would never get there.
+- Condition messages may lag the latest attempt: a status patch
+  is written only when something other than a message changed,
+  because a message carrying a per-attempt token (a provider's
+  request or error id) would otherwise re-trigger the controller
+  through its own watch at the provider's answer rate. The
+  condition's status and reason are always current.
 
 ## Off the data path
 
@@ -1181,7 +1191,6 @@ and the corresponding GHA secret.
   Secret output > gcs driver), but role scoping remains
   unimplemented.
 - Cross-namespace `bucketyRef`.
-- Adopting backing resources that already exist outside Buckety.
 - Quota enforcement.
 - Hot-reload of `buckety-controller.yaml` (envsubst is
   startup-only; rotating credentials requires re-rolling the
@@ -1223,7 +1232,18 @@ contract above:
 5. **Status conditions catalog.** Minimum required: `Ready`,
    `Reconciling`, `BackendUnavailable`, `DriverVersionIncompatible`,
    `ParameterDrift`, `BlockedByAccesses`, `ScopingNotImplemented`.
-   Maintainer can add more.
+   Maintainer can add more. Implemented `Ready=False` reasons
+   beyond the failure ones: `Provisioning` (the backend needs a
+   moment, e.g. IAM propagation of a fresh service account;
+   prompt requeue, bounded), `DeletingContents` and
+   `RevokingAccesses` (teardown in progress), `SecretConflict`
+   (the credentials Secret exists and is not ours),
+   `BackendResourceExists` (adoption refused), `InspectFailed`.
+   Events beyond condition transitions: `Adopted`,
+   `RetainedOnDelete`, `DeletionBlocked`, and `PrincipalReplaced`
+   on a `BucketyAccess` whose credential was re-minted and the
+   previous one revoked - the signal to restart consumers that
+   loaded the Secret once.
 
 ## What to do before writing code
 

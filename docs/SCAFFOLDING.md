@@ -74,8 +74,8 @@ versioning.
 
 ## Webhook TLS
 
-cert-manager when present; webhook-disabled mode for platforms
-without it. The kustomize base annotates the
+cert-manager when present; the shipped certgen Jobs for
+platforms without it. The kustomize base annotates the
 `ValidatingWebhookConfiguration` with
 `cert-manager.io/inject-ca-from: buckety/buckety-controller-webhook`;
 overlays that include `deploy/kustomize/controller/webhook.yaml`
