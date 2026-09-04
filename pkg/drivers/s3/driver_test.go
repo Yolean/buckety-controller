@@ -143,6 +143,17 @@ func TestErrorClassification(t *testing.T) {
 	if isNotFound(other) {
 		t.Fatal("isNotFound over-matches")
 	}
+	// HeadBucket 403s arrive as a synthesized "Forbidden" code or
+	// as a bare status; anything else (timeouts, 500s) must not be
+	// classified as "taken by another account".
+	bare403 := &awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusForbidden}}}}
+	if !isForbidden(&smithy.GenericAPIError{Code: "Forbidden"}) || !isForbidden(other) || !isForbidden(bare403) {
+		t.Fatal("403 not classified as forbidden")
+	}
+	bare500 := &awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusInternalServerError}}}}
+	if isForbidden(nsb) || isForbidden(bare500) || isForbidden(fmt.Errorf("dial tcp: i/o timeout")) {
+		t.Fatal("isForbidden over-matches")
+	}
 }
 
 // The object-store family parameters on the s3 driver: portable
@@ -207,7 +218,7 @@ func TestLifecycleEqual(t *testing.T) {
 
 // versitygw answers HTTP 501 with its own error code
 // (VersioningNotConfigured) rather than NotImplemented; the
-// fail-safe keys on the status code (seen live on run 29507386876).
+// fail-safe keys on the status code (seen live in e2e).
 func TestIsNotImplemented(t *testing.T) {
 	versitygw501 := fmt.Errorf("operation error S3: GetBucketVersioning: %w",
 		&awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{

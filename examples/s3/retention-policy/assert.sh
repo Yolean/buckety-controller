@@ -18,8 +18,8 @@ s3_bucket_exists "$drop_bucket" "$endpoint" "$access" "$secret"
 # just DeleteBucket on an already-empty bucket.
 log "writing objects into $drop_bucket before deletion"
 for key in doomed/one.txt doomed/two.txt; do
-  kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
-    --image=public.ecr.aws/aws-cli/aws-cli:latest \
+  kc run --rm -i --restart=Never --quiet \
+    --image="$AWSCLI_IMAGE" \
     --env="AWS_ACCESS_KEY_ID=$access" \
     --env="AWS_SECRET_ACCESS_KEY=$secret" \
     --env="AWS_REGION=us-east-1" \
@@ -37,8 +37,8 @@ s3_bucket_exists "$keep_bucket" "$endpoint" "$access" "$secret"
 log "deleting Buckety/drop-me (Delete, recursive)"
 kc delete buckety/drop-me --wait=true --timeout=90s
 resource_absent secret/drop-me-bucket 30s
-if kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
-    --image=public.ecr.aws/aws-cli/aws-cli:latest \
+if kc run --rm -i --restart=Never --quiet \
+    --image="$AWSCLI_IMAGE" \
     --env="AWS_ACCESS_KEY_ID=$access" \
     --env="AWS_SECRET_ACCESS_KEY=$secret" \
     "awscli-deleted-$RANDOM" -- \

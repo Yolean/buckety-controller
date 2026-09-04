@@ -8,6 +8,7 @@
 # Test artefacts
 *.test
 *.out
+test/e2e/.work/
 
 # Go workspace
 go.work

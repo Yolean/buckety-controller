@@ -20,6 +20,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // DriverName is the name backends reference under
@@ -83,11 +84,11 @@ func (d *Driver) Bootstrap() string {
 // expired records count as none, matching what a consumer could
 // actually read.
 func (d *Driver) InspectBuckety(ctx context.Context, name string) (registry.Inspection, error) {
-	existing, err := d.describeTopic(ctx, name)
+	exists, err := d.topicExists(ctx, name)
 	if err != nil {
 		return registry.Inspection{}, err
 	}
-	if existing == nil {
+	if !exists {
 		return registry.Inspection{}, nil
 	}
 	starts, err := d.aclient.ListStartOffsets(ctx, name)
@@ -182,7 +183,6 @@ func (d *Driver) ValidateParameters(params map[string]string) error {
 			}
 		case strings.HasPrefix(k, "config."):
 			// Kafka topic-config keys; broker validates content.
-			_ = v
 		default:
 			return fmt.Errorf("unknown parameter %q (kadm v0.1 accepts: partitions, replicationFactor, config.*)", k)
 		}
@@ -255,6 +255,40 @@ type topicView struct {
 	configs    map[string]string
 }
 
+// topicExists asks the brokers directly. kadm's ListTopics (which
+// describeTopic uses) serves metadata up to MetadataMinAge old
+// from the client's cache, which is fine for reconciling a topic
+// this client already knows - but the answer here freezes into
+// status.provenance, and Created is what later licenses
+// DeleteBuckety to remove the topic and its records. A cached
+// "does not exist" for a topic that does must not be possible on
+// that path.
+func (d *Driver) topicExists(ctx context.Context, name string) (bool, error) {
+	req := kmsg.NewPtrMetadataRequest()
+	rt := kmsg.NewMetadataRequestTopic()
+	rt.Topic = kmsg.StringPtr(name)
+	req.Topics = append(req.Topics, rt)
+	resp, err := req.RequestWith(ctx, d.kclient)
+	if err != nil {
+		return false, fmt.Errorf("kadm: metadata for topic %q: %w", name, err)
+	}
+	for _, t := range resp.Topics {
+		if t.Topic == nil || *t.Topic != name {
+			continue
+		}
+		err := kerr.ErrorForCode(t.ErrorCode)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, kerr.UnknownTopicOrPartition):
+			return false, nil
+		default:
+			return false, fmt.Errorf("kadm: metadata for topic %q: %w", name, err)
+		}
+	}
+	return false, nil
+}
+
 func (d *Driver) describeTopic(ctx context.Context, name string) (*topicView, error) {
 	td, err := d.aclient.ListTopics(ctx, name)
 	if err != nil {
@@ -285,7 +319,10 @@ func (d *Driver) describeTopic(ctx context.Context, name string) (*topicView, er
 	view.configs = make(map[string]string)
 	for _, rc := range cfgs {
 		if rc.Err != nil {
-			continue
+			// Skipping would leave the config view empty, and the
+			// align step would then re-apply every config.* key on
+			// every reconcile without the cause ever surfacing.
+			return nil, fmt.Errorf("kadm: describe configs %q: %w", name, rc.Err)
 		}
 		for _, c := range rc.Configs {
 			if c.Value != nil {

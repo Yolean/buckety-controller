@@ -21,64 +21,6 @@ import (
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
 
-// The gate must treat a reason change within the same status as a
-// transition: Ready staying False while moving WaitingForBuckety ->
-// SecretConflict is exactly the moment users need an Event (this
-// suppression shipped once and was caught by e2e).
-func TestEventIfTransition(t *testing.T) {
-	obj := &bucketyv1.BucketyAccess{}
-	base := []metav1.Condition{{
-		Type: "Ready", Status: metav1.ConditionFalse, Reason: "WaitingForBuckety",
-	}}
-
-	drain := func(rec *record.FakeRecorder) []string {
-		var out []string
-		for {
-			select {
-			case e := <-rec.Events:
-				out = append(out, e)
-			default:
-				return out
-			}
-		}
-	}
-
-	rec := record.NewFakeRecorder(10)
-	r := &Reconciler{Recorder: rec}
-
-	// Same status, same reason: suppressed.
-	r.eventIfTransition(obj, base, "Ready", metav1.ConditionFalse, "WaitingForBuckety",
-		corev1.EventTypeWarning, "WaitingForBuckety", "x")
-	if got := drain(rec); len(got) != 0 {
-		t.Fatalf("steady state emitted %v", got)
-	}
-
-	// Same status, new reason: emitted.
-	r.eventIfTransition(obj, base, "Ready", metav1.ConditionFalse, "SecretConflict",
-		corev1.EventTypeWarning, "SecretConflict", "x")
-	if got := drain(rec); len(got) != 1 {
-		t.Fatalf("reason change emitted %v", got)
-	}
-
-	// Status flip: emitted.
-	r.eventIfTransition(obj, base, "Ready", metav1.ConditionTrue, "SecretMinted",
-		corev1.EventTypeNormal, "SecretMinted", "x")
-	if got := drain(rec); len(got) != 1 {
-		t.Fatalf("status flip emitted %v", got)
-	}
-
-	// Condition absent from base (first reconcile): emitted.
-	r.eventIfTransition(obj, nil, "Ready", metav1.ConditionFalse, "GrantFailed",
-		corev1.EventTypeWarning, "GrantFailed", "x")
-	if got := drain(rec); len(got) != 1 {
-		t.Fatalf("first-seen condition emitted %v", got)
-	}
-
-	// Nil recorder: no panic.
-	(&Reconciler{}).eventIfTransition(obj, base, "Ready", metav1.ConditionTrue, "SecretMinted",
-		corev1.EventTypeNormal, "SecretMinted", "x")
-}
-
 // The manager cache only carries Secrets labelled LabelOwnedSecret
 // (issue #10), so writeSecret works from a live read and must (a)
 // stamp the label on creation, (b) stamp it onto owned Secrets
@@ -161,6 +103,7 @@ type grantRecorder struct {
 	req       *registry.GrantRequest
 	data      map[string][]byte
 	principal string
+	minted    bool
 	revoked   []string
 	revokeErr error
 }
@@ -178,7 +121,7 @@ func (g *grantRecorder) GrantAccess(_ context.Context, req registry.GrantRequest
 	if p == "" {
 		p = "rec-principal"
 	}
-	return registry.GrantResult{SecretData: g.data, Principal: p, Scoped: true}, nil
+	return registry.GrantResult{SecretData: g.data, Principal: p, Scoped: true, Revocable: g.minted, Minted: g.minted}, nil
 }
 func (g *grantRecorder) RevokeAccess(_ context.Context, principal string) error {
 	g.revoked = append(g.revoked, principal)
@@ -318,8 +261,8 @@ func reconcilerRequest(ns, name string) reconcile.Request {
 
 // A re-mint that changes the principal must revoke the replaced
 // one AFTER the Secret write, or every lost/hand-edited Secret
-// orphans a live key until the SA's 10-key cap wedges Keys.Create
-// (checkit review finding 1). status.principal advances only once
+// orphans a live key until the SA's 10-key cap wedges Keys.Create.
+// status.principal advances only once
 // revocation succeeds, so failures retry.
 func TestReplacedPrincipalRevoked(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -520,6 +463,87 @@ func TestDeletionBlocksWithoutBackend(t *testing.T) {
 		}
 		if err := cl.Get(ctx, types.NamespacedName{Namespace: "t1", Name: "reader"}, &got); !apierrors.IsNotFound(err) {
 			t.Errorf("access with principal %q not released: %v", principal, err)
+		}
+	}
+}
+
+// secretWriteFails is a client whose Secret creates fail with the
+// given error; everything else reaches the store.
+type secretWriteFails struct {
+	client.Client
+	err error
+}
+
+func (s secretWriteFails) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, ok := obj.(*corev1.Secret); ok {
+		return s.err
+	}
+	return s.Client.Create(ctx, obj, opts...)
+}
+
+// A credential minted in a pass whose Secret write fails is held
+// by nobody and recorded nowhere (status.principal still names
+// the predecessor), so it must be revoked in that same pass -
+// including when the namespace is terminating, where no retry
+// follows and the access finalizer would revoke only the
+// recorded principal.
+func TestMintedCredentialRevokedWhenSecretWriteFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.Now()
+	terminating := &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status: metav1.StatusFailure, Code: 403, Reason: metav1.StatusReasonForbidden,
+		Details: &metav1.StatusDetails{Causes: []metav1.StatusCause{{Type: corev1.NamespaceTerminatingCause}}},
+	}}
+	for name, werr := range map[string]error{
+		"transient":   context.DeadlineExceeded,
+		"terminating": terminating,
+	} {
+		bky := &bucketyv1.Buckety{
+			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "t1"},
+			Spec:       bucketyv1.BucketySpec{Backend: "be"},
+			Status: bucketyv1.BucketyStatus{
+				Backend: "be", BackendResourceName: "t1-orders",
+				Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "EnsuredOnBackend", LastTransitionTime: now}},
+			},
+		}
+		access := &bucketyv1.BucketyAccess{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "reader", Namespace: "t1", UID: "uid-a",
+				Finalizers: []string{bucketyv1.FinalizerCleanup},
+			},
+			Spec: bucketyv1.BucketyAccessSpec{
+				BucketyRef:            bucketyv1.BucketyRef{Name: "orders"},
+				CredentialsSecretName: "reader-creds",
+			},
+		}
+		store := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(bky, access).
+			WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+			Build()
+		rec := &grantRecorder{
+			data:      map[string][]byte{"bucket": []byte("t1-orders")},
+			principal: "projects/p/serviceAccounts/x/keys/fresh",
+			minted:    true,
+		}
+		r := &Reconciler{Client: secretWriteFails{store, werr}, Scheme: scheme, Config: &config.Loaded{
+			Backends: map[string]config.Backend{"be": {Name: "be", Driver: rec}},
+		}}
+		_, _ = r.Reconcile(context.Background(), reconcilerRequest("t1", "reader"))
+		if len(rec.revoked) != 1 || rec.revoked[0] != "projects/p/serviceAccounts/x/keys/fresh" {
+			t.Errorf("%s write failure: revoked %v, want the fresh principal", name, rec.revoked)
+		}
+		var got bucketyv1.BucketyAccess
+		if err := store.Get(context.Background(), types.NamespacedName{Namespace: "t1", Name: "reader"}, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.Principal != "" {
+			t.Errorf("%s write failure: status recorded the unwritten principal %q", name, got.Status.Principal)
 		}
 	}
 }

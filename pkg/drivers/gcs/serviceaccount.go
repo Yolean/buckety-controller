@@ -90,8 +90,7 @@ func (d *Driver) ensureServiceAccount(ctx context.Context, shortName, bucket str
 				// soft-deleted SA holds the name. GCP reserves a
 				// deleted SA's ID for ~30 days, so this state does
 				// not converge on retries and the generic create
-				// error would hide the actual cause (checkit review
-				// finding 2).
+				// error would hide the actual cause.
 				return fmt.Errorf("gcs: service account ID %q is reserved by a recently deleted account; GCP holds deleted SA names for ~30 days. Wait out the window, undelete it if its numeric unique ID is known (gcloud iam service-accounts undelete), or use a different parameters.serviceAccount", email)
 			}
 		}
@@ -186,7 +185,16 @@ func isMemberNotPropagated(err error) bool {
 // replaced on its own; rotation is triggered by deleting the
 // Secret instead, which mints a fresh key and (in the reconciler)
 // revokes the previous one.
-func (d *Driver) ensureAccessKey(ctx context.Context, email string, existing map[string][]byte) ([]byte, string, error) {
+//
+// Minting verifies the ownership marker first: a key is
+// impersonation, and the reconciler-side ordering that normally
+// keeps a foreign SA name from reaching here (the Buckety must be
+// Ready, which required ensureServiceAccount to accept it) is not
+// a check this function can rely on - with the webhook disabled
+// nothing stops parameters.serviceAccount from changing under an
+// access that reads the still-Ready cached status. fresh reports
+// that a key was created.
+func (d *Driver) ensureAccessKey(ctx context.Context, email, bucket string, existing map[string][]byte) (keyJSON []byte, keyID string, fresh bool, err error) {
 	resource := d.saResource(email)
 	if raw, ok := existing["serviceAccountKey"]; ok {
 		var k struct {
@@ -196,7 +204,7 @@ func (d *Driver) ensureAccessKey(ctx context.Context, email string, existing map
 		if json.Unmarshal(raw, &k) == nil && k.ClientEmail == email && k.PrivateKeyID != "" {
 			resp, err := d.iamsvc.Projects.ServiceAccounts.Keys.List(resource).KeyTypes("USER_MANAGED").Context(ctx).Do()
 			if err != nil {
-				return nil, "", fmt.Errorf("gcs: list keys of %q: %w", email, err)
+				return nil, "", false, fmt.Errorf("gcs: list keys of %q: %w", email, err)
 			}
 			expired := false
 			for _, key := range resp.Keys {
@@ -206,7 +214,7 @@ func (d *Driver) ensureAccessKey(ctx context.Context, email string, existing map
 				}
 			}
 			if !expired {
-				return raw, k.PrivateKeyID, nil
+				return raw, k.PrivateKeyID, false, nil
 			}
 		}
 		// Unparseable, mismatched email, or expired: mint fresh.
@@ -215,16 +223,22 @@ func (d *Driver) ensureAccessKey(ctx context.Context, email string, existing map
 		// caps user-managed keys at 10 per SA, bounding accesses
 		// per bucket accordingly.
 	}
+	sa, err := d.iamsvc.Projects.ServiceAccounts.Get(resource).Context(ctx).Do()
+	if err != nil {
+		return nil, "", false, fmt.Errorf("gcs: get service account %q before minting a key: %w", email, err)
+	}
+	if err := verifySAMarker(sa, bucket); err != nil {
+		return nil, "", false, err
+	}
 	key, err := d.iamsvc.Projects.ServiceAccounts.Keys.Create(resource, &iam.CreateServiceAccountKeyRequest{}).Context(ctx).Do()
 	if err != nil {
-		return nil, "", fmt.Errorf("gcs: create key for %q (needs roles/iam.serviceAccountKeyAdmin; the org policy constraints/iam.disableServiceAccountKeyCreation blocks user-managed keys entirely): %w", email, err)
+		return nil, "", false, fmt.Errorf("gcs: create key for %q (needs roles/iam.serviceAccountKeyAdmin; the org policy constraints/iam.disableServiceAccountKeyCreation blocks user-managed keys entirely): %w", email, err)
 	}
-	keyJSON, err := base64.StdEncoding.DecodeString(key.PrivateKeyData)
+	keyJSON, err = base64.StdEncoding.DecodeString(key.PrivateKeyData)
 	if err != nil {
-		return nil, "", fmt.Errorf("gcs: decode created key for %q: %w", email, err)
+		return nil, "", false, fmt.Errorf("gcs: decode created key for %q: %w", email, err)
 	}
-	id := key.Name[strings.LastIndex(key.Name, "/")+1:]
-	return keyJSON, id, nil
+	return keyJSON, key.Name[strings.LastIndex(key.Name, "/")+1:], true, nil
 }
 
 // keyExpired reports whether the key's validity window has

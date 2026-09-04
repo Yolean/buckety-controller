@@ -101,26 +101,13 @@ jobs:
     - name: Set up contain
       uses: solsson/setup-contain@49cc4cce1498df8a59e88fff52c1a9b747f11f08 # v1
 
-    - name: Build controller image (contain) with pinned tag
+    - name: Build controller image with pinned tag, assert the pinned digest
       env:
         T: ${{ steps.release.outputs.tag }}
-      run: |
-        set -euxo pipefail
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-          -trimpath \
-          -buildvcs=false \
-          -ldflags "-s -w -X main.version=${T}" \
-          -o target/linux/amd64/buckety \
-          ./cmd/buckety
-        IMAGE="ghcr.io/yolean/buckety-controller:${T}" \
-          contain build --output ./oci --push=false
-
-    - name: Assert produced digest matches pinned
-      env:
         PINNED: ${{ steps.release.outputs.digest }}
       run: |
         set -euxo pipefail
-        BUILT=$(jq -r '.manifests[0].digest' oci/index.json)
+        BUILT=$(scripts/build-image.sh "$T" ./oci)
         if [[ "$BUILT" != "$PINNED" ]]; then
           echo "Pinned digest in deploy/kustomize/release/kustomization.yaml" >&2
           echo "  ${PINNED}" >&2
@@ -130,30 +117,13 @@ jobs:
           exit 1
         fi
 
-    # The driver-version scenario rotates the controller between a
-    # base, a patch-bumped and a major-bumped driver build (SPEC.md
-    # scenario #9, docs/SCAFFOLDING.md "Driver version stamping").
-    # These images exist only for that rotation: built here with
-    # per-driver -X flags and pushed straight to the run's local
-    # registry. They are not digest-pinned or published.
+    # The driver-version scenario rotates the controller through a
+    # patch-bumped and a major-bumped build of every driver.
+    # build-rotation-images.sh derives the versions from the binary,
+    # so this workflow knows nothing about drivers (SPEC §E2E
+    # harness #5). The images are not digest-pinned or published.
     - name: Build and push driver-version rotation images
-      run: |
-        set -euxo pipefail
-        for v in 0.1.1 1.0.0; do
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-            -trimpath \
-            -buildvcs=false \
-            -ldflags "-s -w -X main.version=dv-${v} \
-              -X github.com/Yolean/buckety-controller/pkg/drivers/kadm.version=${v} \
-              -X github.com/Yolean/buckety-controller/pkg/drivers/s3.version=${v} \
-              -X github.com/Yolean/buckety-controller/pkg/drivers/gcs.version=${v}" \
-            -o target/linux/amd64/buckety \
-            ./cmd/buckety
-          IMAGE="ghcr.io/yolean/buckety-controller:dv-${v}" \
-            contain build --output "./oci-dv-${v}" --push=false
-          crane push --insecure "./oci-dv-${v}" \
-            "localhost:5000/yolean/buckety-controller:dv-${v}"
-        done
+      run: test/e2e/build-rotation-images.sh localhost:5000/yolean/buckety-controller
 
     - name: Run e2e harness
       env:
@@ -164,12 +134,9 @@ jobs:
         # hostname so node containerd can pull it.
         PUSH_AS: localhost:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
         CONTROLLER_IMAGE: k3d-buckety-registry:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
-        E2E_VERSION_BASE: 0.1.0
-        E2E_VERSION_PATCH: 0.1.1
-        E2E_VERSION_MAJOR: 1.0.0
         E2E_IMAGE_BASE: k3d-buckety-registry:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
-        E2E_IMAGE_PATCH: k3d-buckety-registry:5000/yolean/buckety-controller:dv-0.1.1
-        E2E_IMAGE_MAJOR: k3d-buckety-registry:5000/yolean/buckety-controller:dv-1.0.0
+        E2E_IMAGE_PATCH: k3d-buckety-registry:5000/yolean/buckety-controller:dv-patch
+        E2E_IMAGE_MAJOR: k3d-buckety-registry:5000/yolean/buckety-controller:dv-major
       run: ./test/e2e/run.sh
 
     - name: Surface controller logs on failure
@@ -214,26 +181,13 @@ jobs:
     - name: Set up contain
       uses: solsson/setup-contain@49cc4cce1498df8a59e88fff52c1a9b747f11f08 # v1
 
-    - name: Rebuild controller image with pinned tag
+    - name: Rebuild controller image with pinned tag, assert the e2e-tested digest
       env:
         T: ${{ needs.e2e.outputs.tag }}
-      run: |
-        set -euxo pipefail
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-          -trimpath \
-          -buildvcs=false \
-          -ldflags "-s -w -X main.version=${T}" \
-          -o target/linux/amd64/buckety \
-          ./cmd/buckety
-        IMAGE="ghcr.io/yolean/buckety-controller:${T}" \
-          contain build --output ./oci --push=false
-
-    - name: Assert publish-time digest matches the e2e-tested digest
-      env:
         PINNED: ${{ needs.e2e.outputs.digest }}
       run: |
         set -euxo pipefail
-        BUILT=$(jq -r '.manifests[0].digest' oci/index.json)
+        BUILT=$(scripts/build-image.sh "$T" ./oci)
         if [[ "$BUILT" != "$PINNED" ]]; then
           echo "publish rebuild produced ${BUILT}, e2e verified ${PINNED}" >&2
           exit 1

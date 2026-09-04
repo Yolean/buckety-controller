@@ -34,6 +34,7 @@ surfaces.
 4. Restore the controller config so subsequent scenarios are
    not affected.
 
-The config-rotation dance lives in the assert script because
-this scenario, by design, mutates the controller's deploy-time
-state and must restore it.
+The config-rotation dance (`backend_stickiness_scenario` in
+`test/e2e/lib.sh`, shared by every driver's copy of this
+scenario) mutates the controller's deploy-time state by design
+and restores it on exit.

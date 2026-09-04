@@ -188,6 +188,13 @@ type GrantResult struct {
 	// static-credential accesses keep v1alpha1's release
 	// semantics.
 	Revocable bool
+	// Minted reports that this call created Principal on the
+	// backend, as opposed to returning the one already carried by
+	// ExistingSecretData. The reconciler revokes a minted
+	// principal whose Secret write then fails: nothing holds it,
+	// nothing records it, and left alone it would count against
+	// backend key quotas forever.
+	Minted bool
 }
 
 // Factory builds a Driver from its raw `config:` block as it

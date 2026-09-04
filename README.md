@@ -4,8 +4,8 @@ A small in-cluster operator that provisions named resources on
 backing services (Kafka topics, S3 buckets) and mints
 `secretKeyRef`-friendly credentials Secrets for consumers.
 
-> **Status: v1alpha1 shipped.** Both drivers (`kadm`, `s3`) are
-> implemented and covered by the e2e suite in CI. Every commit on
+> **Status: v1alpha1 shipped.** Three drivers (`kadm`, `s3`,
+> `gcs`) are implemented and covered by the e2e suite in CI. Every commit on
 > `main` pins a reproducible image build in
 > [`deploy/kustomize/release/`](./deploy/kustomize/release), and
 > the same digest is pushed to `ghcr.io/yolean/buckety-controller`
@@ -45,8 +45,9 @@ here. The deviations are operational, not architectural:
 - **Recovery.** Standard Kubernetes status conditions
   (`Ready`, `Reconciling`, `BackendUnavailable`,
   `ParameterDrift`, `BlockedByAccesses`) cover the diagnostic
-  surface. Out-of-band drift on the backend is surfaced
-  explicitly rather than silently re-reconciled.
+  surface. Out-of-band drift on the backend is reapplied where
+  the driver can, and surfaced as `ParameterDrift` where it
+  cannot (a partition-count shrink, a bucket location).
 - **Portability.** Backend choice (VersityGW vs MinIO vs AWS S3)
   is a deploy-time cluster-maintainer decision, not part of the
   API. Consumer YAML moves between clusters with different
@@ -140,23 +141,24 @@ The base includes a `ValidatingWebhookConfiguration` whose CA is
 injected by cert-manager (`cert-manager.io/inject-ca-from`), and
 the webhook server needs a TLS Secret named
 `buckety-controller-webhook-tls`. On clusters without
-cert-manager the controller cannot start in its default shape.
-The cert-less recipe:
+cert-manager, vendor `deploy/kustomize/release-tls-selfsigned/`
+instead of `release/`: it adds two `kube-webhook-certgen` Jobs
+that mint a self-signed serving certificate into that Secret and
+patch the webhook's `caBundle`, with no external infrastructure
+([`deploy/kustomize/webhook-certgen/README.md`](./deploy/kustomize/webhook-certgen/README.md)).
+The e2e suite deploys the controller this way.
 
-1. Vendor `deploy/kustomize/crd/` and `deploy/kustomize/controller/`
-   separately (skip the composite base).
-2. Drop `webhook.yaml` from your controller overlay (or patch the
-   `ValidatingWebhookConfiguration` out).
-3. Pass `--enable-webhook=false` to the controller via a
-   Deployment args patch. No `Certificate`, no TLS Secret needed.
-
-In webhook-disabled mode, per-driver parameter and resolved-name
-validation runs in the reconcile loop and surfaces as
-`Ready=False` with reason `InvalidParameters` or `NameInvalid` on
-the resource's status (plus a Warning Event), instead of failing
-the apply. CRD-level CEL still enforces `spec.backend` /
-`spec.name` / `bucketyRef` / `credentialsSecretName` immutability
-and the `role` / `retentionPolicy` enums regardless.
+Running with `--enable-webhook=false` (and `webhook.yaml` dropped
+from the overlay) is a last resort, not a recommended shape:
+per-driver parameter and resolved-name validation then runs in
+the reconcile loop and surfaces as `Ready=False` with reason
+`InvalidParameters` or `NameInvalid` (plus a Warning Event)
+instead of failing the apply, and driver-level parameter
+immutability (a gcs bucket's `location`, its `serviceAccount`)
+is not enforced at all. CRD-level CEL still enforces
+`spec.backend` / `spec.name` / `bucketyRef` /
+`credentialsSecretName` immutability and the `role` /
+`retentionPolicy` enums regardless.
 
 ## Configure
 
@@ -494,7 +496,6 @@ The full list is in [`SPEC.md`](./SPEC.md). Highlights:
 - No MySQL driver.
 - No cross-namespace `bucketyRef`.
 - No hot-reload of `buckety-controller.yaml`.
-- No adoption of pre-existing backing resources.
 
 ## Filing issues
 

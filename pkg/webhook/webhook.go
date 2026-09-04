@@ -20,7 +20,6 @@ import (
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
-	"github.com/Yolean/buckety-controller/pkg/template"
 )
 
 // Validator is the single handler the controller registers at
@@ -78,7 +77,7 @@ func (v *Validator) validateBuckety(_ context.Context, req admission.Request) ad
 	// re-resolution are irrelevant: status.backendResourceName is
 	// sticky and admission must not reject unrelated updates.
 	if bky.Status.BackendResourceName == "" {
-		resolved, err := resolveName(&bky, backend)
+		resolved, err := backend.ResolveName(bky.Spec.Name, bky.Name, bky.Namespace, bky.Labels)
 		if err != nil {
 			return admission.Denied(fmt.Sprintf("spec.name: %v", err))
 		}
@@ -148,16 +147,4 @@ func (v *Validator) validateAccess(_ context.Context, req admission.Request) adm
 	// admission time, and admission webhooks should not read from
 	// the API server. Role enum is enforced by the CRD schema.
 	return admission.Allowed("")
-}
-
-func resolveName(bky *bucketyv1.Buckety, backend config.Backend) (string, error) {
-	if bky.Spec.Name == "" {
-		return bky.Name, nil
-	}
-	return template.Resolve(bky.Spec.Name, template.Inputs{
-		Name:            bky.Name,
-		Namespace:       bky.Namespace,
-		Labels:          bky.Labels,
-		BackendDefaults: backend.Defaults,
-	})
 }

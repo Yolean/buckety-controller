@@ -11,8 +11,8 @@ log "initial bucket=$bucket"
 s3_bucket_exists "$bucket" "$endpoint" "$access" "$secret"
 
 log "out-of-band: deleting bucket $bucket directly"
-kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
-  --image=public.ecr.aws/aws-cli/aws-cli:latest \
+kc run --rm -i --restart=Never --quiet \
+  --image="$AWSCLI_IMAGE" \
   --env="AWS_ACCESS_KEY_ID=$access" \
   --env="AWS_SECRET_ACCESS_KEY=$secret" \
   --env="AWS_REGION=us-east-1" \
@@ -23,8 +23,8 @@ kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
 deadline=$(( $(date +%s) + 90 ))
 recreated=0
 while (( $(date +%s) < deadline )); do
-  if kcg run -n "$E2E_CONTROLLER_NS" --rm -i --restart=Never --quiet \
-      --image=public.ecr.aws/aws-cli/aws-cli:latest \
+  if kc run --rm -i --restart=Never --quiet \
+      --image="$AWSCLI_IMAGE" \
       --env="AWS_ACCESS_KEY_ID=$access" \
       --env="AWS_SECRET_ACCESS_KEY=$secret" \
       --env="AWS_REGION=us-east-1" \

@@ -9,7 +9,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: roundtrip
-        image: public.ecr.aws/aws-cli/aws-cli:latest
+        image: public.ecr.aws/aws-cli/aws-cli:2.36.39@sha256:df8b292f3ae0092a2861eb4ad37f46d755ffd082615f99bb404bb0d118e6e1f1
         env:
         - name: AWS_ENDPOINT_URL
           valueFrom: { secretKeyRef: { name: dial-tone-bucket, key: endpoint } }

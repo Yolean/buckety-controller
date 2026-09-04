@@ -7,6 +7,7 @@ package bucketyaccess
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -26,15 +27,18 @@ import (
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
+	"github.com/Yolean/buckety-controller/pkg/controller/status"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
 
 // Reconciler reconciles BucketyAccess resources.
 type Reconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	Config       *config.Loaded
-	RequeueAfter func() ctrl.Result
+	Scheme *runtime.Scheme
+	Config *config.Loaded
+	// Recheck is the periodic re-check cadence returned from every
+	// settled reconcile; zero disables it (tests).
+	Recheck time.Duration
 	// Recorder emits Events alongside failure conditions so
 	// `kubectl describe` tells the story; nil disables (tests).
 	Recorder record.EventRecorder
@@ -58,20 +62,11 @@ func (r *Reconciler) liveReader() client.Reader {
 	return r.Client
 }
 
-// eventIfTransition emits an Event only when the condition's
-// (status, reason) pair differs from the pre-reconcile state, so
-// steady-state requeues do not spam the event stream. Reason is
-// part of the comparison: Ready staying False while its reason
-// moves (e.g. WaitingForBuckety to SecretConflict) is a
-// transition users need to see.
-func (r *Reconciler) eventIfTransition(obj runtime.Object, baseConds []metav1.Condition, condType string, status metav1.ConditionStatus, condReason, eventType, eventReason, message string) {
-	if r.Recorder == nil {
-		return
-	}
-	if c := meta.FindStatusCondition(baseConds, condType); c != nil && c.Status == status && c.Reason == condReason {
-		return
-	}
-	r.Recorder.Event(obj, eventType, eventReason, message)
+// surface sets a condition and, when that is a transition from
+// base, emits an Event under the same reason.
+func (r *Reconciler) surface(access, base *bucketyv1.BucketyAccess, typ string, st metav1.ConditionStatus, reason, msg, eventType string) {
+	status.Event(r.Recorder, access, base.Status.Conditions, typ, st, reason, eventType, reason, msg)
+	status.Set(&access.Status.Conditions, typ, st, reason, msg, access.Generation)
 }
 
 // SetupWithManager registers this controller with the manager.
@@ -151,16 +146,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 					// backend renames.
 					base := access.DeepCopy()
 					msg := fmt.Sprintf("cannot revoke principal %q: backend %q is not registered in buckety-controller.yaml; restore it to let this BucketyAccess go", access.Status.Principal, bky.Spec.Backend)
-					r.eventIfTransition(&access, base.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable",
+					status.Event(r.Recorder, &access, base.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable",
 						corev1.EventTypeWarning, "DeletionBlocked", msg)
-					setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", msg, access.Generation)
+					status.Set(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", msg, access.Generation)
 					if err := r.patchStatus(ctx, &access, base); err != nil {
 						return ctrl.Result{}, err
 					}
-					if r.RequeueAfter != nil {
-						return r.RequeueAfter(), nil
-					}
-					return ctrl.Result{}, nil
+					return ctrl.Result{RequeueAfter: r.Recheck}, nil
 				}
 				if ok {
 					if err := backend.Driver.RevokeAccess(ctx, access.Status.Principal); err != nil {
@@ -190,15 +182,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// concurrent modification of the resource between our Get and
 	// our write - common when a Buckety just created this implicit
 	// access and several reconcile events fire in quick succession.
-	// Return immediately so the next reconcile sees the finalizer
-	// in place.
+	// Return immediately; the patch's own watch event brings the
+	// next reconcile with the finalizer in place.
 	if !controllerutil.ContainsFinalizer(&access, bucketyv1.FinalizerCleanup) {
 		patch := client.MergeFrom(access.DeepCopy())
 		controllerutil.AddFinalizer(&access, bucketyv1.FinalizerCleanup)
-		if err := r.Patch(ctx, &access, patch); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{}, r.Patch(ctx, &access, patch)
 	}
 
 	// Snapshot for status patching; tolerates concurrent RV bumps
@@ -207,13 +196,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if bkyErr != nil {
 		if apierrors.IsNotFound(bkyErr) {
-			r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "BucketyNotFound",
-				corev1.EventTypeWarning, "BucketyNotFound",
-				fmt.Sprintf("Buckety %q not found in namespace %q", access.Spec.BucketyRef.Name, access.Namespace))
-			setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse,
-				"BucketyNotFound",
-				fmt.Sprintf("Buckety %q not found in namespace %q", access.Spec.BucketyRef.Name, access.Namespace),
-				access.Generation)
+			r.surface(&access, baseAccess, "Ready", metav1.ConditionFalse, "BucketyNotFound",
+				fmt.Sprintf("Buckety %q not found in namespace %q", access.Spec.BucketyRef.Name, access.Namespace), corev1.EventTypeWarning)
 			return ctrl.Result{}, r.patchStatus(ctx, &access, baseAccess)
 		}
 		return ctrl.Result{}, bkyErr
@@ -222,26 +206,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Buckety must be Ready and have its backend resource name
 	// stamped before we can mint a Secret.
 	if bky.Status.BackendResourceName == "" || !isReady(&bky) {
-		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse,
+		status.Set(&access.Status.Conditions, "Ready", metav1.ConditionFalse,
 			"WaitingForBuckety",
 			"Buckety is not Ready yet; will retry",
 			access.Generation)
 		_ = r.patchStatus(ctx, &access, baseAccess)
-		if r.RequeueAfter != nil {
-			return r.RequeueAfter(), nil
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: r.Recheck}, nil
 	}
 
 	backend, ok := r.Config.Lookup(bky.Status.Backend)
 	if !ok {
-		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable",
-			corev1.EventTypeWarning, "BackendUnavailable",
-			fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Status.Backend))
-		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse,
-			"BackendUnavailable",
-			fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Status.Backend),
-			access.Generation)
+		r.surface(&access, baseAccess, "Ready", metav1.ConditionFalse, "BackendUnavailable",
+			fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Status.Backend), corev1.EventTypeWarning)
 		return ctrl.Result{}, r.patchStatus(ctx, &access, baseAccess)
 	}
 
@@ -250,9 +226,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// the Buckety does not exist yet, so this is the authoritative
 	// check for BucketyAccess parameters.
 	if err := backend.Driver.ValidateAccessParameters(access.Spec.Parameters); err != nil {
-		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters",
-			corev1.EventTypeWarning, "InvalidParameters", err.Error())
-		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), access.Generation)
+		r.surface(&access, baseAccess, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), corev1.EventTypeWarning)
 		return ctrl.Result{}, r.patchStatus(ctx, &access, baseAccess)
 	}
 
@@ -261,9 +235,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// serviceAccount) without knowing about CRDs.
 	bkyParams, err := backend.ResolvedParameters(bky.Name, bky.Namespace, bky.Spec.Parameters)
 	if err != nil {
-		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed",
-			corev1.EventTypeWarning, "GrantFailed", err.Error())
-		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed", err.Error(), access.Generation)
+		r.surface(&access, baseAccess, "Ready", metav1.ConditionFalse, "ParameterTemplate", err.Error(), corev1.EventTypeWarning)
 		return ctrl.Result{}, r.patchStatus(ctx, &access, baseAccess)
 	}
 
@@ -286,17 +258,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	switch {
 	case getErr == nil && !metav1.IsControlledBy(&existing, &access):
 		msg := fmt.Sprintf("secret %q exists and is not managed by this BucketyAccess; delete it or pick another credentialsSecretName", access.Spec.CredentialsSecretName)
-		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretConflict", corev1.EventTypeWarning, "SecretConflict", msg)
-		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretConflict", msg, access.Generation)
+		r.surface(&access, baseAccess, "Ready", metav1.ConditionFalse, "SecretConflict", msg, corev1.EventTypeWarning)
 		if err := r.patchStatus(ctx, &access, baseAccess); err != nil {
 			return ctrl.Result{}, err
 		}
 		// Periodic requeue notices when the conflicting Secret goes
 		// away (an unowned Secret's deletion maps to no watch).
-		if r.RequeueAfter != nil {
-			return r.RequeueAfter(), nil
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: r.Recheck}, nil
 	case getErr != nil && !apierrors.IsNotFound(getErr):
 		return ctrl.Result{}, getErr
 	}
@@ -313,9 +281,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		ExistingSecretData: existingData,
 	})
 	if err != nil {
-		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed",
-			corev1.EventTypeWarning, "GrantFailed", err.Error())
-		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "GrantFailed", err.Error(), access.Generation)
+		r.surface(&access, baseAccess, "Ready", metav1.ConditionFalse, "GrantFailed", err.Error(), corev1.EventTypeWarning)
 		_ = r.patchStatus(ctx, &access, baseAccess)
 		return ctrl.Result{}, err
 	}
@@ -329,6 +295,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// pre-label Secrets into the scoped cache.
 	err = r.writeSecret(ctx, &access, &existing, apierrors.IsNotFound(getErr), res.SecretData)
 	if err != nil {
+		// A credential minted in this pass and not written anywhere
+		// is held by nobody and recorded nowhere: status.principal
+		// still names its predecessor, so neither a retry (which
+		// reuses the Secret's key) nor deletion (which revokes the
+		// recorded principal) would ever reach it. Revoke it now;
+		// the retry mints again. Best effort - a failure here is
+		// logged, and the write error is what the status carries.
+		if res.Minted && res.Revocable {
+			if rerr := backend.Driver.RevokeAccess(ctx, res.Principal); rerr != nil {
+				log.Error(rerr, "revoking the credential minted for a failed secret write", "principal", res.Principal)
+			}
+		}
 		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
 			// The namespace is going away and will take this
 			// BucketyAccess with it; retrying with backoff only
@@ -336,9 +314,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			log.Info("secret write skipped; namespace is terminating")
 			return ctrl.Result{}, nil
 		}
-		r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretWriteFailed",
-			corev1.EventTypeWarning, "SecretWriteFailed", err.Error())
-		setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "SecretWriteFailed", err.Error(), access.Generation)
+		r.surface(&access, baseAccess, "Ready", metav1.ConditionFalse, "SecretWriteFailed", err.Error(), corev1.EventTypeWarning)
 		_ = r.patchStatus(ctx, &access, baseAccess)
 		return ctrl.Result{}, err
 	}
@@ -348,16 +324,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// replaced credential now that the Secret carries its
 	// successor. Without this, every re-mint orphans a live key
 	// on the gcs SA until GCP's 10-keys-per-SA cap wedges
-	// Keys.Create permanently (checkit review finding 1).
+	// Keys.Create permanently.
 	// Ordering makes it self-healing: status.principal keeps
 	// naming the old key until revocation succeeds, so a failure
 	// retries here while GrantAccess keeps returning the
 	// already-written replacement.
 	if old := access.Status.Principal; old != "" && old != res.Principal {
 		if rerr := backend.Driver.RevokeAccess(ctx, old); rerr != nil {
-			r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokeFailed",
-				corev1.EventTypeWarning, "RevokeFailed", rerr.Error())
-			setCond(&access.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokeFailed", rerr.Error(), access.Generation)
+			r.surface(&access, baseAccess, "Ready", metav1.ConditionFalse, "RevokeFailed", rerr.Error(), corev1.EventTypeWarning)
 			_ = r.patchStatus(ctx, &access, baseAccess)
 			return ctrl.Result{}, rerr
 		}
@@ -378,7 +352,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// scoping per role and the user asked for something other
 	// than ReadWrite.
 	if !res.Scoped && access.Spec.Role != "" && access.Spec.Role != bucketyv1.RoleReadWrite {
-		setCond(&access.Status.Conditions, "ScopingNotImplemented", metav1.ConditionTrue,
+		status.Set(&access.Status.Conditions, "ScopingNotImplemented", metav1.ConditionTrue,
 			"DriverIgnoresRole",
 			fmt.Sprintf("driver %q v1alpha1 does not scope credentials per role; got root creds despite role=%q", backend.Driver.Name(), access.Spec.Role),
 			access.Generation)
@@ -386,18 +360,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		meta.RemoveStatusCondition(&access.Status.Conditions, "ScopingNotImplemented")
 	}
 
-	r.eventIfTransition(&access, baseAccess.Status.Conditions, "Ready", metav1.ConditionTrue, "SecretMinted",
+	status.Event(r.Recorder, &access, baseAccess.Status.Conditions, "Ready", metav1.ConditionTrue, "SecretMinted",
 		corev1.EventTypeNormal, "SecretMinted",
 		fmt.Sprintf("secret %q minted for backend resource %q", access.Spec.CredentialsSecretName, bky.Status.BackendResourceName))
-	setCond(&access.Status.Conditions, "Ready", metav1.ConditionTrue, "SecretMinted", "", access.Generation)
+	status.Set(&access.Status.Conditions, "Ready", metav1.ConditionTrue, "SecretMinted", "", access.Generation)
 	access.Status.ObservedGeneration = access.Generation
 	if err := r.patchStatus(ctx, &access, baseAccess); err != nil {
 		return ctrl.Result{}, err
 	}
-	if r.RequeueAfter != nil {
-		return r.RequeueAfter(), nil
-	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: r.Recheck}, nil
 }
 
 // writeSecret creates or updates the access's credentials Secret
@@ -434,45 +405,16 @@ func (r *Reconciler) writeSecret(ctx context.Context, access *bucketyv1.BucketyA
 }
 
 // patchStatus writes status only when something OTHER than
-// condition messages changed since base; see the buckety
-// reconciler's counterpart for the full rationale
-// (ISSUE_status_message_reconcile_loop.md): a volatile provider
-// error message would otherwise loop patch -> own-watch event ->
-// reconcile -> new message at the provider's answer rate, with
-// workqueue backoff bypassed.
+// condition messages changed since base
+// (status.ChangedBeyondMessages has the rationale; the loop it
+// prevents is ISSUE_status_message_reconcile_loop.md).
 func (r *Reconciler) patchStatus(ctx context.Context, access, base *bucketyv1.BucketyAccess) error {
-	if !statusChangedBeyondMessages(&base.Status, &access.Status) {
+	if !status.ChangedBeyondMessages(&base.Status, &access.Status, func(s *bucketyv1.BucketyAccessStatus) *[]metav1.Condition { return &s.Conditions }) {
 		return nil
 	}
 	return r.Status().Patch(ctx, access, client.MergeFrom(base))
 }
 
-func statusChangedBeyondMessages(base, cur *bucketyv1.BucketyAccessStatus) bool {
-	b, c := base.DeepCopy(), cur.DeepCopy()
-	for i := range b.Conditions {
-		b.Conditions[i].Message = ""
-	}
-	for i := range c.Conditions {
-		c.Conditions[i].Message = ""
-	}
-	return !equality.Semantic.DeepEqual(b, c)
-}
-
 func isReady(bky *bucketyv1.Buckety) bool {
-	for _, c := range bky.Status.Conditions {
-		if c.Type == "Ready" {
-			return c.Status == metav1.ConditionTrue
-		}
-	}
-	return false
-}
-
-func setCond(conds *[]metav1.Condition, t string, status metav1.ConditionStatus, reason, message string, observed int64) {
-	meta.SetStatusCondition(conds, metav1.Condition{
-		Type:               t,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: observed,
-	})
+	return meta.IsStatusConditionTrue(bky.Status.Conditions, "Ready")
 }

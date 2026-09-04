@@ -3,17 +3,21 @@ package buckety
 import (
 	"context"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
+	"github.com/Yolean/buckety-controller/pkg/controller/status"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
 
@@ -76,8 +80,7 @@ func TestDecideProvenance(t *testing.T) {
 // its finalizer before releasing its own: owner-ref GC would
 // otherwise remove the access after the Buckety, whose absence
 // makes the access finalizer skip RevokeAccess - orphaning a live
-// key on a Retain-surviving service account (checkit review
-// finding 3, sharpened).
+// key on a Retain-surviving service account.
 func TestDeleteWaitsForImplicitAccessRevocation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -184,7 +187,7 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 
 	// Attempt #1: condition appears - patched.
 	base := bky.DeepCopy()
-	setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=aaa111", bky.Generation)
+	status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=aaa111", bky.Generation)
 	if err := r.patchStatus(ctx, bky, base); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +204,7 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 	// loop driver. Must not write.
 	current := got.DeepCopy()
 	base = got.DeepCopy()
-	setCond(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=bbb222", current.Generation)
+	status.Set(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=bbb222", current.Generation)
 	if err := r.patchStatus(ctx, current, base); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +222,7 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 	// message rides along.
 	current = got.DeepCopy()
 	base = got.DeepCopy()
-	setCond(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed", "403 errorId=ccc333", current.Generation)
+	status.Set(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed", "403 errorId=ccc333", current.Generation)
 	if err := r.patchStatus(ctx, current, base); err != nil {
 		t.Fatal(err)
 	}
@@ -246,8 +249,12 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 }
 
 // provisioningDriver stubs registry.Driver with EnsureBuckety
-// answering ErrProvisioningInProgress until released.
-type provisioningDriver struct{ inProgress bool }
+// answering ErrProvisioningInProgress until released, counting
+// the calls that reach the backend.
+type provisioningDriver struct {
+	inProgress       bool
+	ensures, deletes int
+}
 
 func (p *provisioningDriver) Name() string    { return "prov" }
 func (p *provisioningDriver) Version() string { return "0.0.1" }
@@ -255,12 +262,16 @@ func (p *provisioningDriver) InspectBuckety(context.Context, string) (registry.I
 	return registry.Inspection{}, nil
 }
 func (p *provisioningDriver) EnsureBuckety(context.Context, registry.EnsureRequest) error {
+	p.ensures++
 	if p.inProgress {
 		return &registry.ErrProvisioningInProgress{Progress: "service account x is not yet bindable"}
 	}
 	return nil
 }
-func (p *provisioningDriver) DeleteBuckety(context.Context, registry.DeleteRequest) error { return nil }
+func (p *provisioningDriver) DeleteBuckety(context.Context, registry.DeleteRequest) error {
+	p.deletes++
+	return nil
+}
 func (p *provisioningDriver) GrantAccess(context.Context, registry.GrantRequest) (registry.GrantResult, error) {
 	return registry.GrantResult{}, nil
 }
@@ -338,5 +349,245 @@ func TestProvisioningInProgressRequeuesWithoutError(t *testing.T) {
 	}
 	if !ready {
 		t.Errorf("not Ready after provisioning completed: %+v", got.Status.Conditions)
+	}
+}
+
+// SPEC §Buckety shape: the (backend, driver, driverMajor) triple
+// is sticky. A backend name re-pointed at another driver (both at
+// major 0, so the major check alone passes) must pause the
+// resource instead of reconciling a topic's name as a bucket, and
+// must block a retentionPolicy=Delete teardown that would delete
+// on the wrong backend type.
+func TestDriverChangeIsBackendUnavailable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	bky := &bucketyv1.Buckety{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orders", Namespace: "t1",
+			Finalizers: []string{bucketyv1.FinalizerCleanup},
+		},
+		Spec: bucketyv1.BucketySpec{Backend: "be", RetentionPolicy: bucketyv1.RetentionDelete},
+		Status: bucketyv1.BucketyStatus{
+			Backend: "be", Driver: "kadm", BackendResourceName: "t1-orders",
+			Provenance: bucketyv1.ProvenanceCreated,
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky).
+		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+		Build()
+	drv := &provisioningDriver{} // Name() is "prov", not "kadm"
+	r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{
+		Backends: map[string]config.Backend{"be": {Name: "be", Driver: drv}},
+	}}
+	key := types.NamespacedName{Namespace: "t1", Name: "orders"}
+	req := reconcile.Request{NamespacedName: key}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if drv.ensures != 0 {
+		t.Errorf("EnsureBuckety reached the wrong driver %d times", drv.ensures)
+	}
+	var got bucketyv1.Buckety
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	unavailable, ready := "", ""
+	for _, c := range got.Status.Conditions {
+		switch c.Type {
+		case "BackendUnavailable":
+			unavailable = c.Reason
+		case "Ready":
+			ready = string(c.Status)
+		}
+	}
+	if unavailable != "DriverChanged" || ready != "False" {
+		t.Errorf("conditions after driver change: %+v", got.Status.Conditions)
+	}
+
+	// Deletion under retentionPolicy=Delete blocks the same way a
+	// missing backend does; the finalizer stays.
+	if err := cl.Delete(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("delete reconcile: %v", err)
+	}
+	if drv.deletes != 0 {
+		t.Errorf("DeleteBuckety reached the wrong driver %d times", drv.deletes)
+	}
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatalf("resource released to the wrong driver's teardown: %v", err)
+	}
+}
+
+// staleLister is a client whose cached List never sees
+// BucketyAccess objects, the informer lag after the controller's
+// own write. Get/Create/Delete go to the real store.
+type staleLister struct{ client.Client }
+
+func (s staleLister) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*bucketyv1.BucketyAccessList); ok {
+		return nil
+	}
+	return s.Client.List(ctx, list, opts...)
+}
+
+// The reconcile that follows the implicit access's creation is
+// triggered by this reconciler's own status patch and can run
+// before the informer lists the new access; a second Create must
+// be a no-op, not an AlreadyExists error with workqueue backoff.
+// Deletion of the Buckety, which gates the irreversible
+// DeleteBuckety on "no explicit access exists", must not trust
+// that lagging cache at all.
+func TestStaleAccessCacheIsHarmless(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	bky := &bucketyv1.Buckety{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orders", Namespace: "t1", UID: "uid-b",
+			Finalizers: []string{bucketyv1.FinalizerCleanup},
+		},
+		Spec: bucketyv1.BucketySpec{
+			Backend:         "be",
+			RetentionPolicy: bucketyv1.RetentionDelete,
+			DefaultAccess:   &bucketyv1.DefaultAccess{CredentialsSecretName: "orders-creds"},
+		},
+	}
+	store := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky).
+		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+		Build()
+	drv := &provisioningDriver{}
+	r := &Reconciler{Client: staleLister{store}, Live: store, Scheme: scheme, Config: &config.Loaded{
+		Backends: map[string]config.Backend{"be": {Name: "be", Driver: drv}},
+	}}
+	key := types.NamespacedName{Namespace: "t1", Name: "orders"}
+	req := reconcile.Request{NamespacedName: key}
+
+	// Two passes with the cache never showing the implicit access
+	// the first one created: the second must not error.
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", i+1, err)
+		}
+	}
+	var implicit bucketyv1.BucketyAccess
+	if err := store.Get(ctx, key, &implicit); err != nil {
+		t.Fatalf("implicit access not created: %v", err)
+	}
+
+	// An explicit access exists (live) while the cache says none:
+	// deletion must block instead of running DeleteBuckety.
+	explicit := &bucketyv1.BucketyAccess{
+		ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: "t1"},
+		Spec: bucketyv1.BucketyAccessSpec{
+			BucketyRef:            bucketyv1.BucketyRef{Name: "orders"},
+			CredentialsSecretName: "reader-creds",
+		},
+	}
+	if err := store.Create(ctx, explicit); err != nil {
+		t.Fatal(err)
+	}
+	var cur bucketyv1.Buckety
+	if err := store.Get(ctx, key, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("delete pass: %v", err)
+	}
+	if drv.deletes != 0 {
+		t.Errorf("DeleteBuckety ran %d times with a live explicit access present", drv.deletes)
+	}
+	if err := store.Get(ctx, key, &cur); err != nil {
+		t.Fatalf("buckety released past a live explicit access: %v", err)
+	}
+	blocked := false
+	for _, c := range cur.Status.Conditions {
+		if c.Type == "BlockedByAccesses" && c.Status == metav1.ConditionTrue {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Errorf("BlockedByAccesses missing: %+v", cur.Status.Conditions)
+	}
+}
+
+// An in-progress answer is trusted for provisioningPatience and
+// no longer: a resource still "provisioning" minutes later is
+// stuck, and must get the failure posture (error with backoff,
+// Warning event) instead of a Normal event every 2s forever.
+func TestProvisioningOverdueBecomesFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, c := range []struct {
+		name  string
+		since time.Duration
+		fail  bool
+	}{
+		{"fresh", 10 * time.Second, false},
+		{"overdue", provisioningPatience + time.Minute, true},
+	} {
+		bky := &bucketyv1.Buckety{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "orders", Namespace: "t1",
+				Finalizers: []string{bucketyv1.FinalizerCleanup},
+			},
+			Spec: bucketyv1.BucketySpec{Backend: "be"},
+			Status: bucketyv1.BucketyStatus{
+				Backend: "be", Driver: "prov", BackendResourceName: "orders",
+				Conditions: []metav1.Condition{{
+					Type: "Ready", Status: metav1.ConditionFalse, Reason: "Provisioning",
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-c.since)),
+				}},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(bky).
+			WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+			Build()
+		r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{
+			Backends: map[string]config.Backend{"be": {Name: "be", Driver: &provisioningDriver{inProgress: true}}},
+		}}
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "t1", Name: "orders"}})
+		if c.fail && err == nil {
+			t.Errorf("%s: overdue provisioning did not surface as an error", c.name)
+		}
+		if !c.fail && (err != nil || res.RequeueAfter <= 0) {
+			t.Errorf("%s: err=%v res=%+v, want prompt requeue without error", c.name, err, res)
+		}
+		var got bucketyv1.Buckety
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: "t1", Name: "orders"}, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := "Provisioning"
+		if c.fail {
+			want = "EnsureFailed"
+		}
+		if r := meta.FindStatusCondition(got.Status.Conditions, "Ready"); r == nil || r.Reason != want {
+			t.Errorf("%s: Ready condition %+v, want reason %s", c.name, r, want)
+		}
 	}
 }
