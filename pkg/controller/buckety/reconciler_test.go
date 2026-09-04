@@ -246,8 +246,12 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 }
 
 // provisioningDriver stubs registry.Driver with EnsureBuckety
-// answering ErrProvisioningInProgress until released.
-type provisioningDriver struct{ inProgress bool }
+// answering ErrProvisioningInProgress until released, counting
+// the calls that reach the backend.
+type provisioningDriver struct {
+	inProgress       bool
+	ensures, deletes int
+}
 
 func (p *provisioningDriver) Name() string    { return "prov" }
 func (p *provisioningDriver) Version() string { return "0.0.1" }
@@ -255,12 +259,16 @@ func (p *provisioningDriver) InspectBuckety(context.Context, string) (registry.I
 	return registry.Inspection{}, nil
 }
 func (p *provisioningDriver) EnsureBuckety(context.Context, registry.EnsureRequest) error {
+	p.ensures++
 	if p.inProgress {
 		return &registry.ErrProvisioningInProgress{Progress: "service account x is not yet bindable"}
 	}
 	return nil
 }
-func (p *provisioningDriver) DeleteBuckety(context.Context, registry.DeleteRequest) error { return nil }
+func (p *provisioningDriver) DeleteBuckety(context.Context, registry.DeleteRequest) error {
+	p.deletes++
+	return nil
+}
 func (p *provisioningDriver) GrantAccess(context.Context, registry.GrantRequest) (registry.GrantResult, error) {
 	return registry.GrantResult{}, nil
 }
@@ -338,5 +346,81 @@ func TestProvisioningInProgressRequeuesWithoutError(t *testing.T) {
 	}
 	if !ready {
 		t.Errorf("not Ready after provisioning completed: %+v", got.Status.Conditions)
+	}
+}
+
+// SPEC §Buckety shape: the (backend, driver, driverMajor) triple
+// is sticky. A backend name re-pointed at another driver (both at
+// major 0, so the major check alone passes) must pause the
+// resource instead of reconciling a topic's name as a bucket, and
+// must block a retentionPolicy=Delete teardown that would delete
+// on the wrong backend type.
+func TestDriverChangeIsBackendUnavailable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	bky := &bucketyv1.Buckety{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orders", Namespace: "t1",
+			Finalizers: []string{bucketyv1.FinalizerCleanup},
+		},
+		Spec: bucketyv1.BucketySpec{Backend: "be", RetentionPolicy: bucketyv1.RetentionDelete},
+		Status: bucketyv1.BucketyStatus{
+			Backend: "be", Driver: "kadm", BackendResourceName: "t1-orders",
+			Provenance: bucketyv1.ProvenanceCreated,
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky).
+		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+		Build()
+	drv := &provisioningDriver{} // Name() is "prov", not "kadm"
+	r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{
+		Backends: map[string]config.Backend{"be": {Name: "be", Driver: drv}},
+	}}
+	key := types.NamespacedName{Namespace: "t1", Name: "orders"}
+	req := reconcile.Request{NamespacedName: key}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if drv.ensures != 0 {
+		t.Errorf("EnsureBuckety reached the wrong driver %d times", drv.ensures)
+	}
+	var got bucketyv1.Buckety
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	unavailable, ready := "", ""
+	for _, c := range got.Status.Conditions {
+		switch c.Type {
+		case "BackendUnavailable":
+			unavailable = c.Reason
+		case "Ready":
+			ready = string(c.Status)
+		}
+	}
+	if unavailable != "DriverChanged" || ready != "False" {
+		t.Errorf("conditions after driver change: %+v", got.Status.Conditions)
+	}
+
+	// Deletion under retentionPolicy=Delete blocks the same way a
+	// missing backend does; the finalizer stays.
+	if err := cl.Delete(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("delete reconcile: %v", err)
+	}
+	if drv.deletes != 0 {
+		t.Errorf("DeleteBuckety reached the wrong driver %d times", drv.deletes)
+	}
+	if err := cl.Get(ctx, key, &got); err != nil {
+		t.Fatalf("resource released to the wrong driver's teardown: %v", err)
 	}
 }

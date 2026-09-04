@@ -102,11 +102,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Resolve the backend up front; nearly every branch needs it.
+	// The driver behind a backend name is part of the sticky
+	// (backend, driver, driverMajor) triple (SPEC §Buckety shape),
+	// so a backend re-pointed at another driver is as unavailable
+	// as a missing one: reconciling a topic's resource as a bucket,
+	// or deleting it as one under retentionPolicy=Delete, is worse
+	// than pausing.
 	backend, backendOK := r.Config.Lookup(bky.Spec.Backend)
+	unavailableReason, unavailableMsg := "", ""
+	switch {
+	case !backendOK:
+		unavailableReason = "NotInConfig"
+		unavailableMsg = fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Spec.Backend)
+	case bky.Status.Driver != "" && bky.Status.Driver != backend.Driver.Name():
+		unavailableReason = "DriverChanged"
+		unavailableMsg = fmt.Sprintf("backend %q now runs driver %q but this resource was provisioned by driver %q; restore the backend's driver or migrate the resource", bky.Spec.Backend, backend.Driver.Name(), bky.Status.Driver)
+	}
 
 	// Deletion path: handle finalizer before anything else.
 	if !bky.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, &bky, backend, backendOK)
+		return r.reconcileDelete(ctx, &bky, backend, unavailableReason, unavailableMsg)
 	}
 
 	// Ensure finalizer. Patch (no optimistic lock) instead of
@@ -130,8 +145,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// .Status().Update() would conflict on.
 	baseBky := bky.DeepCopy()
 
-	if !backendOK {
-		return r.surfaceBackendUnavailable(ctx, &bky, baseBky)
+	if unavailableReason != "" {
+		return r.surfaceBackendUnavailable(ctx, &bky, baseBky, unavailableReason, unavailableMsg)
 	}
 
 	// First reconcile: stamp sticky fields.
@@ -307,7 +322,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{}, nil
 }
 
-func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety, backend config.Backend, backendOK bool) (ctrl.Result, error) {
+// reconcileDelete runs the finalizer. A non-empty unavailableReason
+// means backend cannot be used for this resource (missing from
+// config, or now behind a different driver) and blocks a
+// retentionPolicy=Delete teardown.
+func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety, backend config.Backend, unavailableReason, unavailableMsg string) (ctrl.Result, error) {
 	base := bky.DeepCopy()
 	// Block on explicit BucketyAccess children before we let the
 	// resource go.
@@ -397,14 +416,12 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 	// until the maintainer restores the backend or the user flips
 	// retentionPolicy to Retain (mutable).
 	if bky.Spec.RetentionPolicy == bucketyv1.RetentionDelete && bky.Status.BackendResourceName != "" {
-		if !backendOK {
-			r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
-				corev1.EventTypeWarning, "DeletionBlocked",
-				fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q", bky.Spec.Backend, bky.Status.BackendResourceName))
-			setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
-				fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q; restore the backend in buckety-controller.yaml or set retentionPolicy=Retain",
-					bky.Spec.Backend, bky.Status.BackendResourceName),
-				bky.Generation)
+		if unavailableReason != "" {
+			msg := fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q, but %s; restore it or set retentionPolicy=Retain",
+				bky.Spec.Backend, bky.Status.BackendResourceName, unavailableMsg)
+			r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, unavailableReason,
+				corev1.EventTypeWarning, "DeletionBlocked", msg)
+			setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, unavailableReason, msg, bky.Generation)
 			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", "deletion blocked", bky.Generation)
 			if err := r.patchStatus(ctx, bky, base); err != nil {
 				return ctrl.Result{}, err
@@ -529,13 +546,10 @@ func (r *Reconciler) reconcileImplicitAccess(ctx context.Context, bky *bucketyv1
 	return nil
 }
 
-func (r *Reconciler) surfaceBackendUnavailable(ctx context.Context, bky, base *bucketyv1.Buckety) (ctrl.Result, error) {
-	r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
-		corev1.EventTypeWarning, "BackendUnavailable",
-		fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Spec.Backend))
-	setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, "NotInConfig",
-		fmt.Sprintf("backend %q is not registered in buckety-controller.yaml", bky.Spec.Backend),
-		bky.Generation)
+func (r *Reconciler) surfaceBackendUnavailable(ctx context.Context, bky, base *bucketyv1.Buckety, reason, msg string) (ctrl.Result, error) {
+	r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, reason,
+		corev1.EventTypeWarning, "BackendUnavailable", msg)
+	setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, reason, msg, bky.Generation)
 	setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", "reconcile paused", bky.Generation)
 	return ctrl.Result{}, r.patchStatus(ctx, bky, base)
 }
