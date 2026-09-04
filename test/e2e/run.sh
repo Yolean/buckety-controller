@@ -143,8 +143,20 @@ images:
   newTag: "$tag"
 EOF
   log "deploying controller as $CONTROLLER_IMAGE"
+  # Idempotent across invocations against one cluster. A previous
+  # run may have left the certgen Jobs behind (they self-delete
+  # after five minutes) and apply does not re-run an unchanged
+  # Job, while re-applying the webhook configuration can drop the
+  # caBundle a scenario's restore wrote into last-applied - so the
+  # Jobs are recreated every time and the patch must land before
+  # the webhook is trusted. The config Secret is applied before
+  # this and is not part of the overlay, so an unchanged
+  # Deployment would keep the config its Pod started with: restart
+  # regardless.
+  kubectl -n "$CONTROLLER_NS" delete job buckety-webhook-certgen-create buckety-webhook-certgen-patch --ignore-not-found
   kubectl apply -k "$HERE/.work"
-  kubectl -n "$CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=180s
+  kubectl -n "$CONTROLLER_NS" wait --for=condition=complete job/buckety-webhook-certgen-patch --timeout=180s
+  restart_controller
 }
 
 # restart_controller picks up a swapped config. Deleting the
