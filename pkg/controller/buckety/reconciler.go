@@ -46,6 +46,22 @@ type Reconciler struct {
 	// Recorder emits Events alongside condition changes so
 	// `kubectl describe` tells the story; nil disables (tests).
 	Recorder record.EventRecorder
+	// Live reads straight from the apiserver, bypassing the
+	// manager cache, for the one decision here that is
+	// irreversible: whether a retentionPolicy=Delete teardown may
+	// run, which depends on no explicit BucketyAccess existing.
+	// Wired from mgr.GetAPIReader(); nil falls back to the cached
+	// client (tests).
+	Live client.Reader
+}
+
+// liveReader returns the uncached reader, or the cached client
+// when tests have not wired one.
+func (r *Reconciler) liveReader() client.Reader {
+	if r.Live != nil {
+		return r.Live
+	}
+	return r.Client
 }
 
 // eventIfTransition emits an Event only when the condition's
@@ -128,15 +144,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Update so we don't conflict with whatever just modified
 	// the resource (e.g. our own controller's previous reconcile
 	// pass, the access reconciler reading the Buckety, etc.).
-	// Return immediately so the next reconcile sees the
-	// finalizer in place.
+	// Return immediately; the patch's own watch event brings the
+	// next reconcile with the finalizer in place.
 	if !controllerutil.ContainsFinalizer(&bky, bucketyv1.FinalizerCleanup) {
 		patch := client.MergeFrom(bky.DeepCopy())
 		controllerutil.AddFinalizer(&bky, bucketyv1.FinalizerCleanup)
-		if err := r.Patch(ctx, &bky, patch); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{}, r.Patch(ctx, &bky, patch)
 	}
 
 	// Snapshot for status patching; tolerates concurrent RV bumps
@@ -329,9 +342,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety, backend config.Backend, unavailableReason, unavailableMsg string) (ctrl.Result, error) {
 	base := bky.DeepCopy()
 	// Block on explicit BucketyAccess children before we let the
-	// resource go.
+	// resource go. Live read: this list gates DeleteBuckety, which
+	// is irreversible, and an access created moments ago can be
+	// missing from the informer cache.
 	accesses := &bucketyv1.BucketyAccessList{}
-	if err := r.List(ctx, accesses, client.InNamespace(bky.Namespace)); err != nil {
+	if err := r.liveReader().List(ctx, accesses, client.InNamespace(bky.Namespace)); err != nil {
 		return ctrl.Result{}, err
 	}
 	var blocking []string
@@ -480,6 +495,12 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 // reconcileImplicitAccess materialises a BucketyAccess from
 // spec.defaultAccess and reclaims it when an explicit access
 // exists or defaultAccess is removed. See SPEC §Implicit access.
+//
+// It reads the cache, and the reconcile that follows its own
+// create or delete (the status patch re-enqueues this Buckety)
+// can run before the informer has caught up, so create tolerates
+// AlreadyExists and delete tolerates NotFound: both mean the
+// previous pass already did the work.
 func (r *Reconciler) reconcileImplicitAccess(ctx context.Context, bky *bucketyv1.Buckety) error {
 	accesses := &bucketyv1.BucketyAccessList{}
 	if err := r.List(ctx, accesses, client.InNamespace(bky.Namespace)); err != nil {
@@ -520,19 +541,16 @@ func (r *Reconciler) reconcileImplicitAccess(ctx context.Context, bky *bucketyv1
 		if err := controllerutil.SetControllerReference(bky, newAccess, r.Scheme); err != nil {
 			return err
 		}
-		return r.Create(ctx, newAccess)
+		return client.IgnoreAlreadyExists(r.Create(ctx, newAccess))
 	case implicit != nil && !wantImplicit:
 		// Reclaim. Owner-ref GC will sweep the Secret.
-		return r.Delete(ctx, implicit)
+		return client.IgnoreNotFound(r.Delete(ctx, implicit))
 	case implicit != nil && wantImplicit:
 		// Field drift: update name/role if the user changed
 		// defaultAccess. CredentialsSecretName on the access is
 		// immutable, so we delete-and-recreate if it changed.
 		if implicit.Spec.CredentialsSecretName != bky.Spec.DefaultAccess.CredentialsSecretName {
-			if err := r.Delete(ctx, implicit); err != nil {
-				return err
-			}
-			return nil // next reconcile will recreate
+			return client.IgnoreNotFound(r.Delete(ctx, implicit)) // next reconcile recreates
 		}
 		desiredRole := bky.Spec.DefaultAccess.Role
 		if desiredRole == "" {

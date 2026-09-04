@@ -142,6 +142,7 @@ func main() {
 		Config:       loaded,
 		RequeueAfter: requeue,
 		Recorder:     mgr.GetEventRecorderFor("buckety-controller"),
+		Live:         mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "buckety controller setup failed")
 		os.Exit(1)

@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -422,5 +423,106 @@ func TestDriverChangeIsBackendUnavailable(t *testing.T) {
 	}
 	if err := cl.Get(ctx, key, &got); err != nil {
 		t.Fatalf("resource released to the wrong driver's teardown: %v", err)
+	}
+}
+
+// staleLister is a client whose cached List never sees
+// BucketyAccess objects, the informer lag after the controller's
+// own write. Get/Create/Delete go to the real store.
+type staleLister struct{ client.Client }
+
+func (s staleLister) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*bucketyv1.BucketyAccessList); ok {
+		return nil
+	}
+	return s.Client.List(ctx, list, opts...)
+}
+
+// The reconcile that follows the implicit access's creation is
+// triggered by this reconciler's own status patch and can run
+// before the informer lists the new access; a second Create must
+// be a no-op, not an AlreadyExists error with workqueue backoff.
+// Deletion of the Buckety, which gates the irreversible
+// DeleteBuckety on "no explicit access exists", must not trust
+// that lagging cache at all.
+func TestStaleAccessCacheIsHarmless(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	bky := &bucketyv1.Buckety{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orders", Namespace: "t1", UID: "uid-b",
+			Finalizers: []string{bucketyv1.FinalizerCleanup},
+		},
+		Spec: bucketyv1.BucketySpec{
+			Backend:         "be",
+			RetentionPolicy: bucketyv1.RetentionDelete,
+			DefaultAccess:   &bucketyv1.DefaultAccess{CredentialsSecretName: "orders-creds"},
+		},
+	}
+	store := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky).
+		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+		Build()
+	drv := &provisioningDriver{}
+	r := &Reconciler{Client: staleLister{store}, Live: store, Scheme: scheme, Config: &config.Loaded{
+		Backends: map[string]config.Backend{"be": {Name: "be", Driver: drv}},
+	}}
+	key := types.NamespacedName{Namespace: "t1", Name: "orders"}
+	req := reconcile.Request{NamespacedName: key}
+
+	// Two passes with the cache never showing the implicit access
+	// the first one created: the second must not error.
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", i+1, err)
+		}
+	}
+	var implicit bucketyv1.BucketyAccess
+	if err := store.Get(ctx, key, &implicit); err != nil {
+		t.Fatalf("implicit access not created: %v", err)
+	}
+
+	// An explicit access exists (live) while the cache says none:
+	// deletion must block instead of running DeleteBuckety.
+	explicit := &bucketyv1.BucketyAccess{
+		ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: "t1"},
+		Spec: bucketyv1.BucketyAccessSpec{
+			BucketyRef:            bucketyv1.BucketyRef{Name: "orders"},
+			CredentialsSecretName: "reader-creds",
+		},
+	}
+	if err := store.Create(ctx, explicit); err != nil {
+		t.Fatal(err)
+	}
+	var cur bucketyv1.Buckety
+	if err := store.Get(ctx, key, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("delete pass: %v", err)
+	}
+	if drv.deletes != 0 {
+		t.Errorf("DeleteBuckety ran %d times with a live explicit access present", drv.deletes)
+	}
+	if err := store.Get(ctx, key, &cur); err != nil {
+		t.Fatalf("buckety released past a live explicit access: %v", err)
+	}
+	blocked := false
+	for _, c := range cur.Status.Conditions {
+		if c.Type == "BlockedByAccesses" && c.Status == metav1.ConditionTrue {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Errorf("BlockedByAccesses missing: %+v", cur.Status.Conditions)
 	}
 }

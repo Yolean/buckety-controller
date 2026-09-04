@@ -190,15 +190,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// concurrent modification of the resource between our Get and
 	// our write - common when a Buckety just created this implicit
 	// access and several reconcile events fire in quick succession.
-	// Return immediately so the next reconcile sees the finalizer
-	// in place.
+	// Return immediately; the patch's own watch event brings the
+	// next reconcile with the finalizer in place.
 	if !controllerutil.ContainsFinalizer(&access, bucketyv1.FinalizerCleanup) {
 		patch := client.MergeFrom(access.DeepCopy())
 		controllerutil.AddFinalizer(&access, bucketyv1.FinalizerCleanup)
-		if err := r.Patch(ctx, &access, patch); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{}, r.Patch(ctx, &access, patch)
 	}
 
 	// Snapshot for status patching; tolerates concurrent RV bumps
