@@ -78,6 +78,22 @@ func (b Backend) EffectiveParameters(crParams map[string]string) map[string]stri
 	return out
 }
 
+// ResolveName resolves a Buckety's spec.name template (empty
+// means metadata.name) against its metadata and this backend's
+// defaults. Admission and the reconciler both call this, so they
+// cannot disagree on what a template resolves to.
+func (b Backend) ResolveName(specName, name, namespace string, labels map[string]string) (string, error) {
+	if specName == "" {
+		return name, nil
+	}
+	return template.Resolve(specName, template.Inputs{
+		Name:            name,
+		Namespace:       namespace,
+		Labels:          labels,
+		BackendDefaults: b.Defaults,
+	})
+}
+
 // ResolvedParameters is EffectiveParameters followed by template
 // resolution of the keys the driver declares templated, against
 // the Buckety's metadata.name/namespace and this backend's

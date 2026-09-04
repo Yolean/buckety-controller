@@ -134,26 +134,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	requeue := func() ctrl.Result { return ctrl.Result{RequeueAfter: periodicRecheck} }
-
 	if err := (&bucketyctrl.Reconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Config:       loaded,
-		RequeueAfter: requeue,
-		Recorder:     mgr.GetEventRecorderFor("buckety-controller"),
-		Live:         mgr.GetAPIReader(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Config:   loaded,
+		Recheck:  periodicRecheck,
+		Recorder: mgr.GetEventRecorderFor("buckety-controller"),
+		Live:     mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "buckety controller setup failed")
 		os.Exit(1)
 	}
 	if err := (&accessctrl.Reconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Config:       loaded,
-		RequeueAfter: requeue,
-		Recorder:     mgr.GetEventRecorderFor("buckety-controller"),
-		Live:         mgr.GetAPIReader(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Config:   loaded,
+		Recheck:  periodicRecheck,
+		Recorder: mgr.GetEventRecorderFor("buckety-controller"),
+		Live:     mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "bucketyaccess controller setup failed")
 		os.Exit(1)

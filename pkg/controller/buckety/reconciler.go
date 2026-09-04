@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,8 +29,8 @@ import (
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
+	"github.com/Yolean/buckety-controller/pkg/controller/status"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
-	"github.com/Yolean/buckety-controller/pkg/template"
 )
 
 // Reconciler reconciles Buckety resources. Backends are resolved
@@ -39,10 +38,11 @@ import (
 // requires re-rolling the Pod per SPEC §controller config file).
 type Reconciler struct {
 	client.Client
-	Scheme         *runtime.Scheme
-	Config         *config.Loaded
-	RequeueAfter   func() ctrl.Result // periodic re-check cadence; injected so tests can stub
-	ControllerName string             // for ownership references on implicit BucketyAccess
+	Scheme *runtime.Scheme
+	Config *config.Loaded
+	// Recheck is the periodic re-check cadence returned from every
+	// settled reconcile; zero disables it (tests).
+	Recheck time.Duration
 	// Recorder emits Events alongside condition changes so
 	// `kubectl describe` tells the story; nil disables (tests).
 	Recorder record.EventRecorder
@@ -64,20 +64,11 @@ func (r *Reconciler) liveReader() client.Reader {
 	return r.Client
 }
 
-// eventIfTransition emits an Event only when the condition's
-// (status, reason) pair differs from the pre-reconcile state, so
-// steady-state requeues do not spam the event stream. Reason is
-// part of the comparison: Ready staying False while its reason
-// moves (e.g. WaitingForBuckety to SecretConflict) is a
-// transition users need to see.
-func (r *Reconciler) eventIfTransition(obj runtime.Object, baseConds []metav1.Condition, condType string, status metav1.ConditionStatus, condReason, eventType, eventReason, message string) {
-	if r.Recorder == nil {
-		return
-	}
-	if c := meta.FindStatusCondition(baseConds, condType); c != nil && c.Status == status && c.Reason == condReason {
-		return
-	}
-	r.Recorder.Event(obj, eventType, eventReason, message)
+// surface sets a condition and, when that is a transition from
+// base, emits an Event under the same reason.
+func (r *Reconciler) surface(bky, base *bucketyv1.Buckety, typ string, st metav1.ConditionStatus, reason, msg, eventType string) {
+	status.Event(r.Recorder, bky, base.Status.Conditions, typ, st, reason, eventType, reason, msg)
+	status.Set(&bky.Status.Conditions, typ, st, reason, msg, bky.Generation)
 }
 
 // SetupWithManager registers the controller with the supplied
@@ -164,7 +155,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// First reconcile: stamp sticky fields.
 	if bky.Status.Backend == "" {
-		resolved, err := resolveName(&bky, backend)
+		resolved, err := backend.ResolveName(bky.Spec.Name, bky.Name, bky.Namespace, bky.Labels)
 		if err != nil {
 			return r.surfaceCondition(ctx, &bky, baseBky, "Ready", metav1.ConditionFalse, "NameTemplate", err.Error())
 		}
@@ -182,9 +173,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// until the spec or the backend changes.
 		inspection, err := backend.Driver.InspectBuckety(ctx, resolved)
 		if err != nil {
-			r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed",
-				corev1.EventTypeWarning, "InspectFailed", err.Error())
-			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", err.Error(), bky.Generation)
+			r.surface(&bky, baseBky, "Ready", metav1.ConditionFalse, "InspectFailed", err.Error(), corev1.EventTypeWarning)
 			_ = r.patchStatus(ctx, &bky, baseBky)
 			return ctrl.Result{}, err
 		}
@@ -193,20 +182,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			msg := fmt.Sprintf(
 				"backend resource %q already exists on backend %q and holds content; refusing to adopt it. Set spec.adoption=Adopt to claim it (adopted resources are never deleted from the backend), or change spec.name.",
 				resolved, backend.Name)
-			r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendResourceExists",
-				corev1.EventTypeWarning, "BackendResourceExists", msg)
-			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendResourceExists", msg, bky.Generation)
-			setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "BackendResourceExists", "adoption refused", bky.Generation)
+			r.surface(&bky, baseBky, "Ready", metav1.ConditionFalse, "BackendResourceExists", msg, corev1.EventTypeWarning)
+			status.Set(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "BackendResourceExists", "adoption refused", bky.Generation)
 			if err := r.patchStatus(ctx, &bky, baseBky); err != nil {
 				return ctrl.Result{}, err
 			}
 			// Spec edits re-enqueue via the watch; the periodic
 			// cadence catches the backend resource being emptied
 			// or removed out-of-band.
-			if r.RequeueAfter != nil {
-				return r.RequeueAfter(), nil
-			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{RequeueAfter: r.Recheck}, nil
 		}
 		if provenance == bucketyv1.ProvenanceAdopted && r.Recorder != nil {
 			r.Recorder.Event(&bky, corev1.EventTypeNormal, "Adopted",
@@ -234,14 +218,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// exempt every pre-1.0 resource from the compatibility check.
 	runningMajor, _ := majorOf(backend.Driver.Version())
 	if bky.Status.Backend != "" && runningMajor != bky.Status.DriverMajor {
-		r.eventIfTransition(&bky, baseBky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue, "DriverMajorBump",
+		status.Event(r.Recorder, &bky, baseBky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue, "DriverMajorBump",
 			corev1.EventTypeWarning, "DriverVersionIncompatible",
 			fmt.Sprintf("stamped major=%d, running=%d; reconcile paused", bky.Status.DriverMajor, runningMajor))
-		setCond(&bky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue,
+		status.Set(&bky.Status.Conditions, "DriverVersionIncompatible", metav1.ConditionTrue,
 			"DriverMajorBump",
 			fmt.Sprintf("stamped major=%d, running=%d; pin a compatible binary or migrate the resource", bky.Status.DriverMajor, runningMajor),
 			bky.Generation)
-		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DriverVersionIncompatible", "reconcile paused", bky.Generation)
+		status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DriverVersionIncompatible", "reconcile paused", bky.Generation)
 		_ = r.patchStatus(ctx, &bky, baseBky)
 		return ctrl.Result{}, nil
 	}
@@ -262,32 +246,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// config.Backend.ResolvedParameters).
 	effective, perr := backend.ResolvedParameters(bky.Name, bky.Namespace, bky.Spec.Parameters)
 	if perr != nil {
-		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate",
-			corev1.EventTypeWarning, "ParameterTemplate", perr.Error())
-		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate", perr.Error(), bky.Generation)
-		setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "ParameterTemplate", "spec change required", bky.Generation)
+		r.surface(&bky, baseBky, "Ready", metav1.ConditionFalse, "ParameterTemplate", perr.Error(), corev1.EventTypeWarning)
+		status.Set(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "ParameterTemplate", "spec change required", bky.Generation)
 		return ctrl.Result{}, r.patchStatus(ctx, &bky, baseBky)
 	}
 	if err := backend.Driver.ValidateParameters(effective); err != nil {
-		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters",
-			corev1.EventTypeWarning, "InvalidParameters", err.Error())
-		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), bky.Generation)
-		setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "InvalidParameters", "spec change required", bky.Generation)
+		r.surface(&bky, baseBky, "Ready", metav1.ConditionFalse, "InvalidParameters", err.Error(), corev1.EventTypeWarning)
+		status.Set(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "InvalidParameters", "spec change required", bky.Generation)
 		return ctrl.Result{}, r.patchStatus(ctx, &bky, baseBky)
 	}
 
 	// Reconcile the backend resource itself.
-	setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionTrue, "Ensuring", "calling driver.EnsureBuckety", bky.Generation)
+	status.Set(&bky.Status.Conditions, "Reconciling", metav1.ConditionTrue, "Ensuring", "calling driver.EnsureBuckety", bky.Generation)
 	if err := backend.Driver.EnsureBuckety(ctx, registry.EnsureRequest{
 		Name:       bky.Status.BackendResourceName,
 		Parameters: effective,
 	}); err != nil {
 		if registry.IsParameterDrift(err) {
-			r.eventIfTransition(&bky, baseBky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable",
+			status.Event(r.Recorder, &bky, baseBky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable",
 				corev1.EventTypeWarning, "ParameterDrift", err.Error())
-			setCond(&bky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable", err.Error(), bky.Generation)
-			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterDrift", err.Error(), bky.Generation)
-			setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Paused", "drift requires human resolution", bky.Generation)
+			status.Set(&bky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable", err.Error(), bky.Generation)
+			status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterDrift", err.Error(), bky.Generation)
+			status.Set(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Paused", "drift requires human resolution", bky.Generation)
 			return ctrl.Result{}, r.patchStatus(ctx, &bky, baseBky)
 		}
 		if registry.IsProvisioningInProgress(err) && !provisioningOverdue(baseBky.Status.Conditions) {
@@ -298,18 +278,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			// misreport a merely-young resource as broken. Bounded
 			// by provisioningPatience: past it, the same answer IS
 			// a failure and gets the Warning + backoff below.
-			r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "Provisioning",
-				corev1.EventTypeNormal, "Provisioning", err.Error())
-			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "Provisioning", err.Error(), bky.Generation)
+			r.surface(&bky, baseBky, "Ready", metav1.ConditionFalse, "Provisioning", err.Error(), corev1.EventTypeNormal)
 			if perr := r.patchStatus(ctx, &bky, baseBky); perr != nil {
 				return ctrl.Result{}, perr
 			}
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		log.Error(err, "driver.EnsureBuckety failed")
-		r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed",
-			corev1.EventTypeWarning, "EnsureFailed", err.Error())
-		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed", err.Error(), bky.Generation)
+		r.surface(&bky, baseBky, "Ready", metav1.ConditionFalse, "EnsureFailed", err.Error(), corev1.EventTypeWarning)
 		_ = r.patchStatus(ctx, &bky, baseBky)
 		return ctrl.Result{}, err
 	}
@@ -322,19 +298,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// All done.
-	r.eventIfTransition(&bky, baseBky.Status.Conditions, "Ready", metav1.ConditionTrue, "EnsuredOnBackend",
+	status.Event(r.Recorder, &bky, baseBky.Status.Conditions, "Ready", metav1.ConditionTrue, "EnsuredOnBackend",
 		corev1.EventTypeNormal, "Provisioned",
 		fmt.Sprintf("backend resource %q ensured on backend %q", bky.Status.BackendResourceName, bky.Status.Backend))
-	setCond(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Idle", "", bky.Generation)
-	setCond(&bky.Status.Conditions, "Ready", metav1.ConditionTrue, "EnsuredOnBackend", "", bky.Generation)
+	status.Set(&bky.Status.Conditions, "Reconciling", metav1.ConditionFalse, "Idle", "", bky.Generation)
+	status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionTrue, "EnsuredOnBackend", "", bky.Generation)
 	bky.Status.ObservedGeneration = bky.Generation
 	if err := r.patchStatus(ctx, &bky, baseBky); err != nil {
 		return ctrl.Result{}, err
 	}
-	if r.RequeueAfter != nil {
-		return r.RequeueAfter(), nil
-	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: r.Recheck}, nil
 }
 
 // reconcileDelete runs the finalizer. A non-empty unavailableReason
@@ -363,10 +336,10 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		blocking = append(blocking, a.Name)
 	}
 	if len(blocking) > 0 {
-		r.eventIfTransition(bky, base.Status.Conditions, "BlockedByAccesses", metav1.ConditionTrue, "Pending",
+		status.Event(r.Recorder, bky, base.Status.Conditions, "BlockedByAccesses", metav1.ConditionTrue, "Pending",
 			corev1.EventTypeWarning, "BlockedByAccesses",
 			fmt.Sprintf("deletion waits on BucketyAccess: %s", strings.Join(blocking, ", ")))
-		setCond(&bky.Status.Conditions, "BlockedByAccesses", metav1.ConditionTrue, "Pending",
+		status.Set(&bky.Status.Conditions, "BlockedByAccesses", metav1.ConditionTrue, "Pending",
 			fmt.Sprintf("waiting on BucketyAccess: %s", strings.Join(blocking, ", ")),
 			bky.Generation)
 		if err := r.patchStatus(ctx, bky, base); err != nil {
@@ -374,10 +347,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		}
 		// Requeue periodically; the BucketyAccess deletions also
 		// re-enqueue this Buckety via the access watch.
-		if r.RequeueAfter != nil {
-			return r.RequeueAfter(), nil
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: r.Recheck}, nil
 	}
 
 	// The implicit access is not a deletion blocker, but it must
@@ -403,7 +373,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		// Normally one pass - but a revocable principal with its
 		// backend missing blocks the access (with its own
 		// condition), so say what is being waited on.
-		setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokingAccesses",
+		status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "RevokingAccesses",
 			fmt.Sprintf("waiting for implicit BucketyAccess %q to revoke before teardown", a.Name),
 			bky.Generation)
 		if err := r.patchStatus(ctx, bky, base); err != nil {
@@ -436,17 +406,14 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		if unavailableReason != "" {
 			msg := fmt.Sprintf("retentionPolicy=Delete needs backend %q to remove %q, but %s; restore it or set retentionPolicy=Retain",
 				bky.Spec.Backend, bky.Status.BackendResourceName, unavailableMsg)
-			r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, unavailableReason,
+			status.Event(r.Recorder, bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, unavailableReason,
 				corev1.EventTypeWarning, "DeletionBlocked", msg)
-			setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, unavailableReason, msg, bky.Generation)
-			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", "deletion blocked", bky.Generation)
+			status.Set(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, unavailableReason, msg, bky.Generation)
+			status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", "deletion blocked", bky.Generation)
 			if err := r.patchStatus(ctx, bky, base); err != nil {
 				return ctrl.Result{}, err
 			}
-			if r.RequeueAfter != nil {
-				return r.RequeueAfter(), nil
-			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{RequeueAfter: r.Recheck}, nil
 		}
 		// The same resolved parameter view Ensure operated on, so
 		// the driver can find per-resource principals (gcs
@@ -456,9 +423,9 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		// deletion blocks rather than orphaning the principal.
 		effective, perr := backend.ResolvedParameters(bky.Name, bky.Namespace, bky.Spec.Parameters)
 		if perr != nil {
-			r.eventIfTransition(bky, base.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate",
+			status.Event(r.Recorder, bky, base.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate",
 				corev1.EventTypeWarning, "DeleteFailed", perr.Error())
-			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate", perr.Error(), bky.Generation)
+			status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "ParameterTemplate", perr.Error(), bky.Generation)
 			_ = r.patchStatus(ctx, bky, base)
 			return ctrl.Result{}, perr
 		}
@@ -471,17 +438,13 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 				// slices; this is progress, not failure. The
 				// (status, reason) event gate keeps the stream
 				// quiet while the message advances.
-				r.eventIfTransition(bky, base.Status.Conditions, "Ready", metav1.ConditionFalse, "DeletingContents",
-					corev1.EventTypeNormal, "DeletingContents", err.Error())
-				setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DeletingContents", err.Error(), bky.Generation)
+				r.surface(bky, base, "Ready", metav1.ConditionFalse, "DeletingContents", err.Error(), corev1.EventTypeNormal)
 				if perr := r.patchStatus(ctx, bky, base); perr != nil {
 					return ctrl.Result{}, perr
 				}
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 			}
-			r.eventIfTransition(bky, base.Status.Conditions, "Ready", metav1.ConditionFalse, "DeleteFailed",
-				corev1.EventTypeWarning, "DeleteFailed", err.Error())
-			setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "DeleteFailed", err.Error(), bky.Generation)
+			r.surface(bky, base, "Ready", metav1.ConditionFalse, "DeleteFailed", err.Error(), corev1.EventTypeWarning)
 			_ = r.patchStatus(ctx, bky, base)
 			return ctrl.Result{}, err
 		}
@@ -567,19 +530,17 @@ func (r *Reconciler) reconcileImplicitAccess(ctx context.Context, bky *bucketyv1
 }
 
 func (r *Reconciler) surfaceBackendUnavailable(ctx context.Context, bky, base *bucketyv1.Buckety, reason, msg string) (ctrl.Result, error) {
-	r.eventIfTransition(bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, reason,
+	status.Event(r.Recorder, bky, base.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, reason,
 		corev1.EventTypeWarning, "BackendUnavailable", msg)
-	setCond(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, reason, msg, bky.Generation)
-	setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", "reconcile paused", bky.Generation)
+	status.Set(&bky.Status.Conditions, "BackendUnavailable", metav1.ConditionTrue, reason, msg, bky.Generation)
+	status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "BackendUnavailable", "reconcile paused", bky.Generation)
 	return ctrl.Result{}, r.patchStatus(ctx, bky, base)
 }
 
-func (r *Reconciler) surfaceCondition(ctx context.Context, bky, base *bucketyv1.Buckety, condType string, status metav1.ConditionStatus, reason, message string) (ctrl.Result, error) {
-	// Only failure surfaces route through here; the happy path
-	// records its own Provisioned event.
-	r.eventIfTransition(bky, base.Status.Conditions, condType, status, reason,
-		corev1.EventTypeWarning, reason, message)
-	setCond(&bky.Status.Conditions, condType, status, reason, message, bky.Generation)
+// surfaceCondition is surface for failures that end the reconcile:
+// Warning event, then the status patch.
+func (r *Reconciler) surfaceCondition(ctx context.Context, bky, base *bucketyv1.Buckety, typ string, st metav1.ConditionStatus, reason, msg string) (ctrl.Result, error) {
+	r.surface(bky, base, typ, st, reason, msg, corev1.EventTypeWarning)
 	return ctrl.Result{}, r.patchStatus(ctx, bky, base)
 }
 
@@ -614,19 +575,6 @@ func decideProvenance(insp registry.Inspection, policy bucketyv1.AdoptionPolicy)
 	}
 }
 
-// resolveName runs the name template against the Buckety + backend.
-func resolveName(bky *bucketyv1.Buckety, backend config.Backend) (string, error) {
-	if bky.Spec.Name == "" {
-		return bky.Name, nil
-	}
-	return template.Resolve(bky.Spec.Name, template.Inputs{
-		Name:            bky.Name,
-		Namespace:       bky.Namespace,
-		Labels:          bky.Labels,
-		BackendDefaults: backend.Defaults,
-	})
-}
-
 // majorOf parses the major number out of a SemVer string.
 // Returns 0 and the parse error if the input is malformed.
 func majorOf(v string) (int, error) {
@@ -638,47 +586,12 @@ func majorOf(v string) (int, error) {
 }
 
 // patchStatus writes status only when something OTHER than
-// condition messages changed since base. Message text is allowed
-// to be volatile - provider errors embed per-attempt tokens (a
-// GCS 403 mints a fresh troubleshooter errorId on every call) -
-// and a message-only patch feeds the controller's own Buckety
-// watch: patch -> watch event -> immediate reconcile -> fresh
-// provider error -> new message -> patch, at whatever rate the
-// provider answers (observed ~18/s), with workqueue backoff never
-// engaging because watch events are Adds, not requeues
-// (ISSUE_status_message_reconcile_loop.md). Skipping the write
-// breaks the cycle structurally, whatever the next provider
-// embeds: the message rides along with the next real transition,
-// which says the same thing attempt #1 said. Cost: progress-style
-// message refreshes (recursive-deletion counts) lag while their
-// condition is otherwise unchanged.
+// condition messages changed since base
+// (status.ChangedBeyondMessages has the rationale; the loop it
+// prevents is ISSUE_status_message_reconcile_loop.md).
 func (r *Reconciler) patchStatus(ctx context.Context, bky, base *bucketyv1.Buckety) error {
-	if !statusChangedBeyondMessages(&base.Status, &bky.Status) {
+	if !status.ChangedBeyondMessages(&base.Status, &bky.Status, func(s *bucketyv1.BucketyStatus) *[]metav1.Condition { return &s.Conditions }) {
 		return nil
 	}
 	return r.Status().Patch(ctx, bky, client.MergeFrom(base))
-}
-
-func statusChangedBeyondMessages(base, cur *bucketyv1.BucketyStatus) bool {
-	b, c := base.DeepCopy(), cur.DeepCopy()
-	for i := range b.Conditions {
-		b.Conditions[i].Message = ""
-	}
-	for i := range c.Conditions {
-		c.Conditions[i].Message = ""
-	}
-	return !equality.Semantic.DeepEqual(b, c)
-}
-
-// setCond is a wrapper around meta.SetStatusCondition that stamps
-// ObservedGeneration so consumers can tell which spec produced
-// the condition.
-func setCond(conds *[]metav1.Condition, t string, status metav1.ConditionStatus, reason, message string, observed int64) {
-	meta.SetStatusCondition(conds, metav1.Condition{
-		Type:               t,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: observed,
-	})
 }

@@ -17,6 +17,7 @@ import (
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
+	"github.com/Yolean/buckety-controller/pkg/controller/status"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
 
@@ -79,8 +80,7 @@ func TestDecideProvenance(t *testing.T) {
 // its finalizer before releasing its own: owner-ref GC would
 // otherwise remove the access after the Buckety, whose absence
 // makes the access finalizer skip RevokeAccess - orphaning a live
-// key on a Retain-surviving service account (checkit review
-// finding 3, sharpened).
+// key on a Retain-surviving service account.
 func TestDeleteWaitsForImplicitAccessRevocation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -187,7 +187,7 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 
 	// Attempt #1: condition appears - patched.
 	base := bky.DeepCopy()
-	setCond(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=aaa111", bky.Generation)
+	status.Set(&bky.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=aaa111", bky.Generation)
 	if err := r.patchStatus(ctx, bky, base); err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 	// loop driver. Must not write.
 	current := got.DeepCopy()
 	base = got.DeepCopy()
-	setCond(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=bbb222", current.Generation)
+	status.Set(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "InspectFailed", "403 errorId=bbb222", current.Generation)
 	if err := r.patchStatus(ctx, current, base); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestPatchStatusIgnoresMessageOnlyChanges(t *testing.T) {
 	// message rides along.
 	current = got.DeepCopy()
 	base = got.DeepCopy()
-	setCond(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed", "403 errorId=ccc333", current.Generation)
+	status.Set(&current.Status.Conditions, "Ready", metav1.ConditionFalse, "EnsureFailed", "403 errorId=ccc333", current.Generation)
 	if err := r.patchStatus(ctx, current, base); err != nil {
 		t.Fatal(err)
 	}
