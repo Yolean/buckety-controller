@@ -35,15 +35,12 @@
 #   KUBECONFIG         Cluster the harness writes to.
 #   CONTROLLER_NS      Namespace the buckety-controller runs in.
 #                      Default: buckety.
-#   OVERLAYS_DIR       Where per-implementation overlays live.
-#                      Default: <repo>/test/e2e/overlays.
 #
-# Each per-implementation overlay is a kustomize bundle that:
-#   - applies deploy/kustomize/base
-#   - patches the controller image (overlay or set-image at runtime)
-#   - provides a buckety-controller-config Secret with the
-#     backends this implementation should expose
-#   - applies any implementation-specific bootstrap manifests
+# The controller is deployed once from overlay/ (the release base
+# plus webhook-certgen, args and backing-service credentials).
+# Each implementation then only swaps the controller config
+# (configs/<impl>.yaml) and restarts the controller - the same
+# operation a platform performs on a config change.
 #
 # Scenario discovery: every directory under examples/<driver>/...
 # that contains both kustomization.yaml AND assert.sh is a
@@ -56,7 +53,6 @@ set -euo pipefail
 here() { cd "$(dirname "${BASH_SOURCE[0]}")" && pwd; }
 HERE="$(here)"
 REPO="$(cd "$HERE/../.." && pwd)"
-OVERLAYS_DIR="${OVERLAYS_DIR:-$HERE/overlays}"
 CONTROLLER_NS="${CONTROLLER_NS:-buckety}"
 KEEP_FAILED="${KEEP_FAILED:-false}"
 IMPLEMENTATIONS="${IMPLEMENTATIONS:-redpanda,versitygw,minio,fakegcs}"
@@ -65,6 +61,16 @@ IMPLEMENTATIONS="${IMPLEMENTATIONS:-redpanda,versitygw,minio,fakegcs}"
 # pick which examples/<driver>/* to run for each implementation.
 declare -A IMPL_DRIVER=(
   [redpanda]=kadm
+  [versitygw]=s3
+  [minio]=s3
+  [fakegcs]=gcs
+)
+# Map implementation -> the backend name its config declares for
+# the driver-agnostic scenarios. backend-stickiness renames it to
+# prove status.backend stickiness; the renamed config is derived
+# from configs/<impl>.yaml rather than kept as a second copy.
+declare -A IMPL_BACKEND=(
+  [redpanda]=kafka
   [versitygw]=s3
   [minio]=s3
   [fakegcs]=gcs
@@ -89,58 +95,67 @@ sideload_image() {
 
 # ---- per-implementation lifecycle ----------------------------
 
-apply_overlay() {
-  local impl="$1"
-  local overlay="$OVERLAYS_DIR/$impl"
-  [[ -d "$overlay" ]] || fail "overlay missing for implementation '$impl': $overlay"
-  log "applying overlay $overlay"
-  kubectl apply -k "$overlay"
-  ensure_webhook_tls
-  # Overlays ship the baked-in default image; CI and local k3d both push
-  # to a per-run registry, so patch the deployment to CONTROLLER_IMAGE
-  # before rollout instead of carrying a stale tag.
-  kubectl -n "$CONTROLLER_NS" set image deploy/buckety-controller \
-    controller="$CONTROLLER_IMAGE"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$HERE/.work"' EXIT
+
+# apply_config installs a config file as the controller's config
+# Secret - the operation a platform performs on a config change,
+# and the one the config-swapping scenarios perform too.
+apply_config() {
+  kubectl -n "$CONTROLLER_NS" create secret generic buckety-controller-config \
+    --from-file=buckety-controller.yaml="$1" \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
+# switch_config points the controller at implementation $1's
+# config and derives the renamed variant for backend-stickiness.
+# Sets E2E_ORIGINAL_CONFIG / E2E_RENAMED_CONFIG for the scenarios.
+switch_config() {
+  local impl="$1" backend="${IMPL_BACKEND[$1]}"
+  E2E_ORIGINAL_CONFIG="$HERE/configs/$impl.yaml"
+  E2E_RENAMED_CONFIG="$WORK/$impl.renamed.yaml"
+  sed "s/^- name: ${backend}\$/- name: ${backend}-renamed/" "$E2E_ORIGINAL_CONFIG" >"$E2E_RENAMED_CONFIG"
+  grep -q -- "^- name: ${backend}-renamed" "$E2E_RENAMED_CONFIG" \
+    || fail "configs/$impl.yaml declares no backend named '$backend'"
+  log "controller config: $E2E_ORIGINAL_CONFIG"
+  apply_config "$E2E_ORIGINAL_CONFIG"
+}
+
+# deploy_controller applies overlay/ once, with CONTROLLER_IMAGE
+# set through a kustomize images transformer: `kubectl set image`
+# after an apply would first roll out the base's placeholder tag
+# (and leave an ImagePullBackOff pod behind on every re-apply).
+# The certgen Jobs mint the webhook TLS Secret; the controller
+# restarts until it exists and turns Ready only once its webhook
+# listener answers, which is what `rollout status` waits for.
+deploy_controller() {
+  [[ "$CONTROLLER_IMAGE" != *@* ]] \
+    || fail "CONTROLLER_IMAGE must be a tag reference, got a digest: $CONTROLLER_IMAGE"
+  local name="${CONTROLLER_IMAGE%:*}" tag="${CONTROLLER_IMAGE##*:}"
+  # Generated next to overlay/ (gitignored): kustomize wants the
+  # resource path relative, and refuses one above its root.
+  mkdir -p "$HERE/.work"
+  cat >"$HERE/.work/kustomization.yaml" <<EOF
+resources:
+- ../overlay
+images:
+- name: ghcr.io/yolean/buckety-controller
+  newName: $name
+  newTag: "$tag"
+EOF
+  log "deploying controller as $CONTROLLER_IMAGE"
+  kubectl apply -k "$HERE/.work"
   kubectl -n "$CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=180s
 }
 
-# The base overlay ships a ValidatingWebhookConfiguration that
-# expects cert-manager to populate caBundle. In e2e there is no
-# cert-manager, so generate a one-shot self-signed cert, mount it
-# into the controller, and patch the VWC's caBundle to trust it.
-# parameter-mutation and similar scenarios actively probe the
-# webhook so disabling it via --enable-webhook=false would mask
-# real regressions.
-WEBHOOK_TLS_DIR=""
-ensure_webhook_tls() {
-  if [[ -z "$WEBHOOK_TLS_DIR" ]]; then
-    command -v openssl >/dev/null || fail "openssl required for self-signed webhook TLS"
-    log "generating self-signed webhook TLS"
-    WEBHOOK_TLS_DIR="$(mktemp -d)"
-    openssl req -x509 -newkey rsa:2048 -days 365 -nodes \
-      -keyout "$WEBHOOK_TLS_DIR/tls.key" -out "$WEBHOOK_TLS_DIR/tls.crt" \
-      -subj "/CN=buckety-controller-webhook.${CONTROLLER_NS}.svc" \
-      -addext "subjectAltName=DNS:buckety-controller-webhook.${CONTROLLER_NS}.svc,DNS:buckety-controller-webhook.${CONTROLLER_NS}.svc.cluster.local" \
-      >/dev/null 2>&1
-  fi
-  kubectl -n "$CONTROLLER_NS" create secret tls buckety-controller-webhook-tls \
-    --cert="$WEBHOOK_TLS_DIR/tls.crt" --key="$WEBHOOK_TLS_DIR/tls.key" \
-    --dry-run=client -o yaml | kubectl apply -f -
-  local ca_bundle
-  ca_bundle="$(base64 -w0 <"$WEBHOOK_TLS_DIR/tls.crt")"
-  kubectl patch validatingwebhookconfiguration buckety-controller --type=json \
-    -p="[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${ca_bundle}\"}]"
+# restart_controller picks up a swapped config. Deleting the
+# overlay between implementations is not an option: CRDs with
+# terminating scenario CRs would hang, and the next apply would be
+# rejected while the CRD is terminating.
+restart_controller() {
+  kubectl -n "$CONTROLLER_NS" rollout restart deploy/buckety-controller
+  kubectl -n "$CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=180s
 }
-
-# No teardown between implementations. Deleting the overlay would
-# delete the CRDs while scenario CRs (which carry finalizers) may
-# still be terminating in their namespaces; the CRD then hangs in
-# Terminating and the next implementation's apply is rejected with
-# "create not allowed while custom resource definition is
-# terminating". apply_overlay converges the config Secret and the
-# Deployment in place instead; kubectl apply prunes the env vars a
-# previous overlay patched in, because they are absent from the
-# next overlay's last-applied configuration.
 
 # ---- scenario discovery and execution -------------------------
 
@@ -228,8 +243,8 @@ run_scenario() {
     E2E_BACKEND_ZONE="${E2E_BACKEND_ZONE:-e2e}" \
     E2E_KAFKA_NAMESPACE="${E2E_KAFKA_NAMESPACE:-redpanda}" \
     E2E_KAFKA_BOOTSTRAP="${E2E_KAFKA_BOOTSTRAP:-redpanda.redpanda.svc.cluster.local:9093}" \
-    E2E_ORIGINAL_CONFIG="$OVERLAYS_DIR/$impl/buckety-controller.yaml" \
-    E2E_RENAMED_CONFIG="$OVERLAYS_DIR/$impl/buckety-controller.renamed.yaml" \
+    E2E_ORIGINAL_CONFIG="$E2E_ORIGINAL_CONFIG" \
+    E2E_RENAMED_CONFIG="$E2E_RENAMED_CONFIG" \
     E2E_VERSION_BASE="${E2E_VERSION_BASE:-}" \
     E2E_VERSION_PATCH="${E2E_VERSION_PATCH:-}" \
     E2E_VERSION_MAJOR="${E2E_VERSION_MAJOR:-}" \
@@ -254,7 +269,7 @@ run_scenario() {
 
 sideload_image
 
-declare -i fails=0
+declare -i fails=0 deployed=0
 declare -A results
 IFS=',' read -ra impl_list <<<"$IMPLEMENTATIONS"
 for impl in "${impl_list[@]}"; do
@@ -264,7 +279,13 @@ for impl in "${impl_list[@]}"; do
   log "============================================================"
   log "implementation=$impl  driver=$driver"
   log "============================================================"
-  apply_overlay "$impl"
+  switch_config "$impl"
+  if (( deployed )); then
+    restart_controller
+  else
+    deploy_controller
+    deployed=1
+  fi
 
   # The scenario list is materialised up front instead of streamed
   # on stdin, so nothing a scenario runs can consume the remainder

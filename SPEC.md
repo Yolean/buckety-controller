@@ -1142,7 +1142,7 @@ Required CI matrix for v1alpha1:
 
 Adding an implementation later (e.g. AWS S3 once the project has
 credentials and a budget) requires no example or harness changes,
-only a new controller-config overlay under `test/e2e/overlays/`
+only a new controller-config overlay under `test/e2e/configs/`
 and the corresponding GHA secret.
 
 ## Build and distribution
