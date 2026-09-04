@@ -27,11 +27,10 @@
 #                      `kubectl logs` (SPEC.md section "E2E harness
 #                      and parity" #3).
 #   E2E_IMAGE_BASE / E2E_IMAGE_PATCH / E2E_IMAGE_MAJOR
-#   E2E_VERSION_BASE / E2E_VERSION_PATCH / E2E_VERSION_MAJOR
-#                      Controller images built with rotated driver
-#                      versions, for the driver-version scenario. CI
-#                      builds and pushes these; when unset the
-#                      scenario logs SKIPPED and exits 0.
+#                      Controller images built with the drivers'
+#                      versions rotated (build-rotation-images.sh),
+#                      for the driver-version scenario. When unset
+#                      the scenario logs SKIPPED and exits 0.
 #   KUBECONFIG         Cluster the harness writes to.
 #   CONTROLLER_NS      Namespace the buckety-controller runs in.
 #                      Default: buckety.
@@ -245,9 +244,6 @@ run_scenario() {
     E2E_KAFKA_BOOTSTRAP="${E2E_KAFKA_BOOTSTRAP:-redpanda.redpanda.svc.cluster.local:9093}" \
     E2E_ORIGINAL_CONFIG="$E2E_ORIGINAL_CONFIG" \
     E2E_RENAMED_CONFIG="$E2E_RENAMED_CONFIG" \
-    E2E_VERSION_BASE="${E2E_VERSION_BASE:-}" \
-    E2E_VERSION_PATCH="${E2E_VERSION_PATCH:-}" \
-    E2E_VERSION_MAJOR="${E2E_VERSION_MAJOR:-}" \
     E2E_IMAGE_BASE="${E2E_IMAGE_BASE:-}" \
     E2E_IMAGE_PATCH="${E2E_IMAGE_PATCH:-}" \
     E2E_IMAGE_MAJOR="${E2E_IMAGE_MAJOR:-}" \

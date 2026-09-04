@@ -495,6 +495,59 @@ backend_stickiness_scenario() {
   log "backend-stickiness PASS"
 }
 
+# driver_version_scenario <buckety-name>
+# SPEC §End-to-end coverage #9. Needs E2E_IMAGE_BASE/PATCH/MAJOR
+# (test/e2e/build-rotation-images.sh); skips loudly otherwise -
+# switching to a nonexistent image would wedge the controller for
+# every scenario after this one. The base driver version is
+# whatever the base image stamps, and the rotation images derive
+# from the same binary (X.Y.Z+1 and (X+1).0.0 per driver), so the
+# expectations derive from status too: nothing here knows what
+# any driver's current version is.
+driver_version_scenario() {
+  local name="$1"
+  if [[ -z "${E2E_IMAGE_BASE:-}" || -z "${E2E_IMAGE_PATCH:-}" || -z "${E2E_IMAGE_MAJOR:-}" ]]; then
+    log "driver-version SKIPPED: E2E_IMAGE_BASE/PATCH/MAJOR not set (CI provides these; test/e2e/build-rotation-images.sh builds them locally)"
+    exit 0
+  fi
+  trap 'controller_set_image "$E2E_IMAGE_BASE"' EXIT
+
+  controller_set_image "$E2E_IMAGE_BASE"
+  wait_ready "buckety/$name" 120s
+  local base x y z
+  base="$(kc get "buckety/$name" -o jsonpath='{.status.driverBuildVersion}')"
+  IFS=. read -r x y z <<<"$base"
+  [[ -n "$z" ]] || fail "status.driverBuildVersion '$base' is not X.Y.Z"
+  local patch="$x.$y.$((z + 1))"
+  [[ "$(kc get "buckety/$name" -o jsonpath='{.status.driverMajor}')" == "$x" ]] \
+    || fail "status.driverMajor is not the major of driverBuildVersion $base"
+
+  # Patch bump: auto-applied; buildVersion advances; major unchanged.
+  controller_set_image "$E2E_IMAGE_PATCH"
+  local bv=""
+  for _ in $(seq 1 30); do
+    bv="$(kc get "buckety/$name" -o jsonpath='{.status.driverBuildVersion}' 2>/dev/null || echo)"
+    [[ "$bv" == "$patch" ]] && break
+    sleep 2
+  done
+  [[ "$bv" == "$patch" ]] \
+    || fail "after patch-rotate, driverBuildVersion=$bv, expected $patch"
+  [[ "$(kc get "buckety/$name" -o jsonpath='{.status.driverMajor}')" == "$x" ]] \
+    || fail "driverMajor changed after patch bump"
+  [[ "$(condition_status "buckety/$name" Ready)" == "True" ]] \
+    || fail "Ready not True after patch-rotate"
+
+  # Major bump: incompatible; surfaces DriverVersionIncompatible.
+  controller_set_image "$E2E_IMAGE_MAJOR"
+  wait_condition "buckety/$name" DriverVersionIncompatible True 90s
+  [[ "$(kc get "buckety/$name" -o jsonpath='{.status.driverMajor}')" == "$x" ]] \
+    || fail "driverMajor changed under major bump"
+  [[ "$(condition_status "buckety/$name" Ready)" == "False" ]] \
+    || fail "Ready should be False under DriverVersionIncompatible"
+
+  log "driver-version PASS"
+}
+
 # misconfigured_startup_scenario <scenario-dir>
 # SPEC §End-to-end coverage #10. Every <dir>/broken-configs/<file>
 # listed in <dir>/expectations.txt is installed as the controller

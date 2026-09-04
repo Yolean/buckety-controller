@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-gcs.schema.json
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: pinned
+spec:
+  backend: gcs
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: pinned-bucket

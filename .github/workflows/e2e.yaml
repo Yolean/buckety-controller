@@ -117,23 +117,13 @@ jobs:
           exit 1
         fi
 
-    # The driver-version scenario rotates the controller between a
-    # base, a patch-bumped and a major-bumped driver build (SPEC.md
-    # scenario #9, docs/SCAFFOLDING.md "Driver version stamping").
-    # These images exist only for that rotation: built here with
-    # per-driver -X flags and pushed straight to the run's local
-    # registry. They are not digest-pinned or published.
+    # The driver-version scenario rotates the controller through a
+    # patch-bumped and a major-bumped build of every driver.
+    # build-rotation-images.sh derives the versions from the binary,
+    # so this workflow knows nothing about drivers (SPEC §E2E
+    # harness #5). The images are not digest-pinned or published.
     - name: Build and push driver-version rotation images
-      run: |
-        set -euxo pipefail
-        for v in 0.1.1 1.0.0; do
-          scripts/build-image.sh "dv-${v}" "./oci-dv-${v}" \
-            -X github.com/Yolean/buckety-controller/pkg/drivers/kadm.version=${v} \
-            -X github.com/Yolean/buckety-controller/pkg/drivers/s3.version=${v} \
-            -X github.com/Yolean/buckety-controller/pkg/drivers/gcs.version=${v}
-          crane push --insecure "./oci-dv-${v}" \
-            "localhost:5000/yolean/buckety-controller:dv-${v}"
-        done
+      run: test/e2e/build-rotation-images.sh localhost:5000/yolean/buckety-controller
 
     - name: Run e2e harness
       env:
@@ -144,12 +134,9 @@ jobs:
         # hostname so node containerd can pull it.
         PUSH_AS: localhost:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
         CONTROLLER_IMAGE: k3d-buckety-registry:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
-        E2E_VERSION_BASE: 0.1.0
-        E2E_VERSION_PATCH: 0.1.1
-        E2E_VERSION_MAJOR: 1.0.0
         E2E_IMAGE_BASE: k3d-buckety-registry:5000/yolean/buckety-controller:${{ steps.release.outputs.tag }}
-        E2E_IMAGE_PATCH: k3d-buckety-registry:5000/yolean/buckety-controller:dv-0.1.1
-        E2E_IMAGE_MAJOR: k3d-buckety-registry:5000/yolean/buckety-controller:dv-1.0.0
+        E2E_IMAGE_PATCH: k3d-buckety-registry:5000/yolean/buckety-controller:dv-patch
+        E2E_IMAGE_MAJOR: k3d-buckety-registry:5000/yolean/buckety-controller:dv-major
       run: ./test/e2e/run.sh
 
     - name: Surface controller logs on failure
