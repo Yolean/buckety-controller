@@ -43,3 +43,11 @@ spec:
               key: root-secretkey
         - name: STORAGE_EMULATOR_HOST
           value: fake-gcs.blobs.svc.cluster.local:8000
+        # Optional so clusters without the MariaDB backing service
+        # (backing-services/mariadb-secret.sh not run) still start.
+        - name: MYSQL_BUCKETY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-buckety
+              key: password
+              optional: true

@@ -6,3 +6,4 @@ resources:
 - versitygw.yaml
 - minio.yaml
 - fakegcs.yaml
+- mariadb

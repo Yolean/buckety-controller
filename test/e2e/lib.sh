@@ -64,7 +64,9 @@ secret_has_keys() {
     fi
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
-    kc get "secret/$secret" -o yaml >&2 || true
+    # Key names only: the values are credentials.
+    # shellcheck disable=SC2016 # a go-template, not shell
+    log "Secret/$secret has keys: $(kc get "secret/$secret" -o go-template='{{range $k, $v := .data}}{{$k}} {{end}}' 2>/dev/null || true)"
     fail "Secret/$secret missing keys: ${missing[*]}"
   fi
 }

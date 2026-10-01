@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/pkg/config/schema/buckety-controller.schema.json
+# Controller config for e2e against MariaDB (backing-services/mariadb).
+# The account and its password are set up by
+# backing-services/mariadb-secret.sh and the first-boot script.
+backends:
+
+- name: mysql
+  driver: mysql
+  config:
+    host: mysql.mysql.svc.cluster.local
+    adminUser: buckety
+    adminPassword: ${MYSQL_BUCKETY_PASSWORD}
+  defaults:
+    zone: e2e

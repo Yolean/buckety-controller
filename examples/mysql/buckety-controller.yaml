@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/pkg/config/schema/buckety-controller.schema.json
+#
+# A mysql backend for a MariaDB whose buckety account was created by
+# bootstrap/ (or by the same three statements, run by hand). Schema
+# of the config block: pkg/drivers/mysql/schema/v0.1/config.schema.json.
+backends:
+
+- name: cluster-mysql
+  driver: mysql
+  config:
+    host: mysql.mysql.svc.cluster.local
+    port: 3306
+    adminUser: buckety
+    # From the controller's env (controller-env-patch.yaml), which
+    # reads the Secret mysql-buckety in the controller namespace.
+    adminPassword: ${MYSQL_BUCKETY_PASSWORD}
+    # Every database and user the driver creates or touches starts
+    # with this; the account's database grant is on the same prefix.
+    namePrefix: b_
+    # Host part of created users. Must admit the controller too.
+    userHost: "%"
+    # Optional: verified TLS on the controller's own connections.
+    # tls:
+    #   caFile: /etc/buckety/mysql-ca/ca.crt
+  # Optional cluster-wide defaults under each Buckety's parameters.
+  # Both are immutable per database; add them before the first
+  # Buckety, not to a backend with existing ones (SPEC.md, Naming
+  # templates > parameter defaults).
+  # parameters:
+  #   characterSet: utf8mb4
+  #   collation: utf8mb4_unicode_ci

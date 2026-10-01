@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-mysql.schema.json
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: orders
+spec:
+  backend: mysql
+  # Database names must start with the backend's namePrefix (b_).
+  name: "b_${namespace}_${name}"
+  parameters:
+    characterSet: utf8mb4
+    collation: utf8mb4_unicode_ci
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: orders-db

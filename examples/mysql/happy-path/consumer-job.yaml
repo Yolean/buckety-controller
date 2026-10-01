@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: orders-roundtrip
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: roundtrip
+        image: ghcr.io/yolean/mariadb:10.11.19-jammy@sha256:7f22313fc130a377a44999965bcb0a08dd5b21e8502824c1b864f792f9bc66ab
+        env:
+        - name: DB_HOST
+          valueFrom: { secretKeyRef: { name: orders-db, key: host } }
+        - name: DB_PORT
+          valueFrom: { secretKeyRef: { name: orders-db, key: port } }
+        - name: DB_NAME
+          valueFrom: { secretKeyRef: { name: orders-db, key: database } }
+        - name: DB_USER
+          valueFrom: { secretKeyRef: { name: orders-db, key: username } }
+        # The client reads MYSQL_PWD, keeping the password off the
+        # command line.
+        - name: MYSQL_PWD
+          valueFrom: { secretKeyRef: { name: orders-db, key: password } }
+        command: [bash, -ec]
+        args:
+        - |
+          sql() { mariadb --host="$DB_HOST" --port="$DB_PORT" --user="$DB_USER" --batch --skip-column-names "$DB_NAME" -e "$1"; }
+          sql "CREATE TABLE IF NOT EXISTS probe (id INT PRIMARY KEY, msg VARCHAR(40))"
+          sql "ALTER TABLE probe ADD COLUMN IF NOT EXISTS at TIMESTAMP NULL"
+          sql "REPLACE INTO probe (id, msg) VALUES (1, 'hello-buckety')"
+          [ "$(sql 'SELECT msg FROM probe WHERE id = 1')" = hello-buckety ]
