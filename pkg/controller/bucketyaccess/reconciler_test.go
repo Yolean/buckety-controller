@@ -206,6 +206,9 @@ func TestGrantGatedOnSecretAndFedExistingData(t *testing.T) {
 	if rec.req.BucketyName != "t1-orders" {
 		t.Errorf("BucketyName: %q", rec.req.BucketyName)
 	}
+	if rec.req.AccessNamespace != "t1" || rec.req.AccessName != "reader" {
+		t.Errorf("access identity: %q/%q", rec.req.AccessNamespace, rec.req.AccessName)
+	}
 	var secret corev1.Secret
 	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "t1", Name: "reader-creds"}, &secret); err != nil {
 		t.Fatalf("minted secret: %v", err)

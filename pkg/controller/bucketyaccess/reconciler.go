@@ -275,6 +275,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	res, err := backend.Driver.GrantAccess(ctx, registry.GrantRequest{
 		BucketyName:        bky.Status.BackendResourceName,
+		AccessNamespace:    access.Namespace,
+		AccessName:         access.Name,
 		Role:               string(access.Spec.Role),
 		Parameters:         access.Spec.Parameters,
 		BucketyParameters:  bkyParams,

@@ -138,6 +138,11 @@ type GrantRequest struct {
 	// BucketyName is the resolved backend resource name the
 	// access is being minted for.
 	BucketyName string
+	// AccessNamespace and AccessName identify the BucketyAccess.
+	// Drivers that create one backend principal per access (mysql
+	// users) derive its name from them; the others ignore them.
+	AccessNamespace string
+	AccessName      string
 	// Role is BucketyAccess.spec.role. v1alpha1 drivers
 	// typically ignore this and return Scoped=false.
 	Role string
