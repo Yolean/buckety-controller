@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "mysql driver Buckety parameters",
+  "description": "Schema for Buckety.spec.parameters when the resolved driver is mysql. All values are strings per the CRD contract. Omitted parameters are unmanaged: the server's character_set_server/collation_server defaults apply at creation and the driver never compares them afterwards. Both parameters are set at creation and immutable; the driver never alters an existing database's defaults (that would not convert its tables), so a database whose defaults differ - changed out of band, or adopted - surfaces ParameterDrift.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "characterSet": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]{1,31}$",
+      "not": {"const": "utf8"},
+      "description": "Default character set of the database, e.g. utf8mb4. \"utf8\" is refused as ambiguous (utf8mb3 today, utf8mb4 in future server versions); name utf8mb4 or utf8mb3."
+    },
+    "collation": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,63}$",
+      "not": {"pattern": "^utf8_"},
+      "description": "Default collation of the database, e.g. utf8mb4_unicode_ci. Use the full name as information_schema.SCHEMATA reports it, or the value will read as drift."
+    }
+  }
+}

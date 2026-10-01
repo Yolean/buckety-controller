@@ -13,6 +13,7 @@
 //	buckety-gcs.schema.json           full gcs driver parameters
 //	buckety-s3.schema.json            full s3 driver parameters
 //	buckety-kadm.schema.json          kadm driver parameters (no family)
+//	buckety-mysql.schema.json         mysql driver parameters (no family)
 //
 // Run via `go run ./scripts/gen-cr-schemas` from the repo root; CI
 // asserts the output is committed (git diff --exit-code -- schema/).
@@ -41,7 +42,7 @@ func main() {
 		desc       string
 	}{
 		{"", "",
-			"Standalone editor schema for a Buckety against any backend. spec.parameters is unconstrained at this level; SPECIALIZE by switching the $schema URL suffix: buckety-blobstore (portable across bucket backends), buckety-gcs, buckety-s3, buckety-kadm."},
+			"Standalone editor schema for a Buckety against any backend. spec.parameters is unconstrained at this level; SPECIALIZE by switching the $schema URL suffix: buckety-blobstore (portable across bucket backends), buckety-gcs, buckety-s3, buckety-kadm, buckety-mysql."},
 		// "blobstore" is the user-facing name of the object-store
 		// driver family (pkg/drivers/objectstore) - it matches how
 		// consumers talk about these resources (blobs namespaces
@@ -54,6 +55,8 @@ func main() {
 			"Standalone editor schema for a Buckety whose backend resolves to the s3 driver. GENERALIZE to buckety-blobstore to keep the resource portable across bucket backends, or to buckety for no parameter constraints."},
 		{"kadm", "pkg/drivers/kadm/schema/v0.1/parameters.schema.json",
 			"Standalone editor schema for a Buckety whose backend resolves to the kadm driver. kadm is deliberately not in a driver family (families are per service kind); GENERALIZE to buckety for no parameter constraints."},
+		{"mysql", "pkg/drivers/mysql/schema/v0.1/parameters.schema.json",
+			"Standalone editor schema for a Buckety whose backend resolves to the mysql driver (a MariaDB/MySQL database). mysql is not in a driver family; GENERALIZE to buckety for no parameter constraints. spec.name must resolve to a name starting with the backend's namePrefix, e.g. b_${namespace}_${name}; admission enforces it."},
 	}
 
 	must(os.MkdirAll("schema", 0o755))

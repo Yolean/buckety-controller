@@ -23,6 +23,7 @@ nothing else:
 | `buckety-gcs.schema.json` | the full gcs driver set |
 | `buckety-s3.schema.json` | the full s3 driver set |
 | `buckety-kadm.schema.json` | the kadm driver set (`partitions`, `replicationFactor`, `config.*`) - kadm is not in a family |
+| `buckety-mysql.schema.json` | the mysql driver set (`characterSet`, `collation`) - mysql is not in a family |
 | `bucketyaccess.schema.json` | (BucketyAccess; parameters unconstrained) |
 
 Editor validation is documentation and early feedback, not
