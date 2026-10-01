@@ -25,8 +25,9 @@ kubectl -n buckety create secret generic mysql-buckety --from-file=password=mysq
 rm mysql-buckety-password
 ```
 
-Use 16-128 characters of `A-Za-z0-9._~-`; the bootstrap script
-refuses anything else.
+Use 16-128 characters of `A-Za-z0-9._~-` and no trailing newline;
+the bootstrap script refuses anything else, and the controller
+refuses a line break.
 
 ## 2. Create the controller's account
 

@@ -26,7 +26,7 @@
     "adminPassword": {
       "type": "string",
       "minLength": 1,
-      "description": "The controller's password; use ${VAR} interpolation from a Secret-sourced env var rather than a literal. envsubst:\"true\"."
+      "description": "The controller's password; use ${VAR} interpolation from a Secret-sourced env var rather than a literal. A line break is a startup error (the usual cause is a Secret created from a file with a trailing newline). envsubst:\"true\"."
     },
     "namePrefix": {
       "type": "string",
@@ -36,9 +36,9 @@
     },
     "userHost": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9.%_:/-]{1,255}$",
+      "pattern": "^[a-z0-9.%_:/-]{1,255}$",
       "default": "%",
-      "description": "Host part of created accounts ('user'@'<userHost>'). Must also admit the controller's own address: the driver verifies passwords and grants by logging in as each user. Changing it moves accesses to new accounts on their next reconcile and drops the old ones."
+      "description": "Host part of created accounts ('user'@'<userHost>'), lowercase as the server stores it. Must also admit the controller's own address: the driver verifies passwords and grants by logging in as each user. Changing it moves accesses to new accounts on their next reconcile and drops the old ones."
     },
     "tls": {
       "type": "object",

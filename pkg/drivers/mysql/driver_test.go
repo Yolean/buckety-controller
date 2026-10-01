@@ -461,17 +461,31 @@ func TestGrantLoginErrorIsNotRepair(t *testing.T) {
 	}
 }
 
-func TestGrantRedactsPassword(t *testing.T) {
+// Server messages of statements that carry a password are dropped:
+// a parse error quotes the statement, possibly cut mid-password.
+func TestGrantKeepsPasswordOutOfErrors(t *testing.T) {
+	for _, number := range []uint16{1064, 1819} {
+		fc := &fakeConn{}
+		fc.onExec = func(q string, args []any) error {
+			pw := args[len(args)-1].(string)
+			return &gomysql.MySQLError{Number: number, Message: fmt.Sprintf("near '%s' at line 1", pw[:10])}
+		}
+		_, err := testDriver(fc).GrantAccess(context.Background(), grantReq("ReadWrite", nil))
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("server error %d", number)) {
+			t.Fatalf("want the error number, got %v", err)
+		}
+		if strings.Contains(err.Error(), fc.execs[0].args[2].(string)[:10]) || strings.Contains(err.Error(), "near") {
+			t.Fatal("error carries the server message, and with it part of the password")
+		}
+	}
+	// Client-side errors keep their text, minus the password.
 	fc := &fakeConn{}
 	fc.onExec = func(q string, args []any) error {
-		return &gomysql.MySQLError{Number: 1064, Message: fmt.Sprintf("syntax error near '%v'", args[len(args)-1])}
+		return fmt.Errorf("write tcp: broken pipe after %v", args[len(args)-1])
 	}
 	_, err := testDriver(fc).GrantAccess(context.Background(), grantReq("ReadWrite", nil))
-	if err == nil || !strings.Contains(err.Error(), "<redacted>") {
-		t.Fatalf("want a redacted error, got %v", err)
-	}
-	if strings.Contains(err.Error(), string(fc.execs[0].args[2].(string))) {
-		t.Fatal("error contains the generated password")
+	if err == nil || !strings.Contains(err.Error(), "broken pipe") || !strings.Contains(err.Error(), "<redacted>") {
+		t.Fatalf("client error: %v", err)
 	}
 }
 

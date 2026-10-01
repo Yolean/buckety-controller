@@ -2,10 +2,13 @@ package mysql
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"regexp"
 	"strings"
+
+	gomysql "github.com/go-sql-driver/mysql"
 )
 
 // Passwords are drawn from the URL-unreserved characters: they need
@@ -63,6 +66,25 @@ func redact(err error, secret string) error {
 		return err
 	}
 	return redactedError(strings.ReplaceAll(err.Error(), secret, "<redacted>"))
+}
+
+// statementError describes an error from a statement that carried a
+// password. A server error keeps only its number: messages such as
+// a parse error's "near '...'" quote the statement and may cut it
+// mid-password, which redact cannot catch.
+func statementError(err error, password string) error {
+	var me *gomysql.MySQLError
+	if errors.As(err, &me) {
+		hint := ""
+		switch me.Number {
+		case 1819:
+			hint = ": the server's password policy rejected the password"
+		case 1227:
+			hint = ": the controller's account lacks the CREATE USER privilege"
+		}
+		return redactedError(fmt.Sprintf("server error %d%s", me.Number, hint))
+	}
+	return redact(err, password)
 }
 
 type redactedError string

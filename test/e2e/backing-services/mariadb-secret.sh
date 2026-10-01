@@ -23,7 +23,11 @@ if ! kubectl -n mysql get secret mysql-buckety >/dev/null 2>&1; then
   echo "created secret mysql/mysql-buckety"
 fi
 
+# create/replace, not apply: apply would also store the data in the
+# last-applied-configuration annotation.
+verb=create
+kubectl -n "$CONTROLLER_NS" get secret mysql-buckety >/dev/null 2>&1 && verb=replace
 kubectl -n mysql get secret mysql-buckety -o json \
   | jq --arg ns "$CONTROLLER_NS" '{apiVersion, kind, type, data, metadata: {name: .metadata.name, namespace: $ns}}' \
-  | kubectl apply -f - >/dev/null
+  | kubectl "$verb" -f - >/dev/null
 echo "secret mysql-buckety present in namespaces mysql and $CONTROLLER_NS"

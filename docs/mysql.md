@@ -45,17 +45,29 @@ the controller's account to its own users; the driver does:
   lowercase letters, digits, `_` and `-` within the length limits,
   and not be a system schema or account (`mysql`, `sys`, `root`,
   `mariadb.sys`, ...);
-- `namePrefix` must end with `_`, may not be a prefix of a system
-  name (`performance_` is refused), and the admin account itself
-  must be outside it;
+- `namePrefix` is at most 10 characters ending in `_`, which keeps
+  it off every system schema and account name, and the admin
+  account itself must be outside it;
 - `RevokeAccess` parses `status.principal` and refuses to drop
   anything outside the prefix, so a tampered status cannot drop
-  `root`.
+  `root`. Within the prefix the driver trusts status: whoever can
+  write `BucketyAccess` status (by RBAC, only the controller) could
+  make it drop another access's user.
 
 A controller compromise (its credentials, or a code path that
 bypasses these checks) can still alter or drop any account on the
 server. **Sensitive accounts belong on an instance the controller
-has no backend for.**
+has no backend for.** On MySQL 8.0.16+ an account holding
+`SYSTEM_USER` (root has it) cannot be altered or dropped by an
+account without it, which narrows the exposure there; MariaDB has
+no equivalent.
+
+**`namePrefix` is fixed for the backend's lifetime.** Databases
+and principals stamped under one prefix are refused under another:
+reconciles fail and access deletion blocks. To change it, add a
+second backend with the new prefix and migrate; to retire one
+anyway, drop its users and databases by hand and remove the
+finalizers.
 
 ## Naming
 
@@ -109,10 +121,13 @@ Privileges are granted on the one database, by its escaped name
 | `Writer` | refused: `Ready=False`, reason `GrantFailed`, no Secret |
 
 ReadWrite includes the DDL that schema migrations need (an application
-that migrates its own schema on startup, as Keycloak does). On every reconcile the driver
+that migrates its own schema on startup, as Keycloak does). Database-level `DROP` and
+`CREATE` also let a ReadWrite user drop its own database, or
+recreate it; nothing beyond it. On every reconcile the driver
 grants what is missing and revokes everything else the user holds
-on the database, including privileges granted out of band
-(`EXECUTE`, `CREATE VIEW`, ...) and `GRANT OPTION`. `Scoped` is
+on the database by its exact name, including privileges granted out
+of band (`EXECUTE`, `CREATE VIEW`, ...) and `GRANT OPTION`. Grants
+it cannot see are listed under *Known limitations*. `Scoped` is
 true, so `ScopingNotImplemented` never surfaces for this driver.
 
 ## Credentials and drift
@@ -131,7 +146,10 @@ key), `username`, `password`, `jdbcUrl`
   escaping anywhere the driver puts them. Anything else is refused
   without echoing it.
 - Deleting the Secret rotates the password: the next reconcile
-  generates one and sets it with `ALTER USER`.
+  generates one and sets it with `ALTER USER`. Each change is an
+  account statement, which on Galera replicates as a cluster-wide
+  blocking (TOI) operation; there is no rate limit, so a tenant
+  editing its Secret in a loop can slow the cluster.
 
 The admin account cannot see other users or their grants without
 SELECT on the `mysql` schema, so the driver checks each user by
@@ -151,8 +169,9 @@ a new account on its next reconcile, and the controller drops the
 old one.
 
 Passwords never appear in logs or errors: the driver builds no DSN
-strings, and errors from statements that carry a password are
-redacted before they reach a condition or event.
+strings, and an error from a statement that carries a password
+keeps only the server's error number (a parse error's message
+quotes the statement) before it reaches a condition or event.
 
 ## SQL construction
 
@@ -195,6 +214,10 @@ under every policy; a retained database keeps no credentials.
 
 `tls: {}` in the backend config requires verified TLS on the
 controller's connections (`caFile` and `serverName` optional).
+Without it, every access's password crosses the network in
+cleartext, inside `CREATE USER`/`ALTER USER` statements and the
+login checks; leave `tls` out only where that network is trusted
+(an in-cluster Service with NetworkPolicies, say).
 Created users get no `REQUIRE SSL`; to require TLS from consumers,
 set `require_secure_transport` on the server. On MySQL 8 without
 `tls`, `caching_sha2_password` makes the client fetch the server's
@@ -240,7 +263,11 @@ RSA key unauthenticated before sending the password; configure
   dropped again; a controller crash between `CREATE USER` and the
   status write can still leave a user that no `BucketyAccess`
   records. Such users are found by the prefix.
-- Table- and column-level grants are not managed.
+- Grants the driver cannot see are not managed: table- and
+  column-level grants, grants that reach the database through a
+  wildcard pattern (`b\_%`, `b_t1%`), global privileges and roles.
+  The login check reads only the user's database-level row for the
+  exact database name.
 - An account with the same user name and a more specific host
   (created by hand) shadows the managed one: the driver cannot
   inspect the managed account through it and re-asserts it on every

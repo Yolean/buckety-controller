@@ -180,7 +180,7 @@ func TestParsePrincipal(t *testing.T) {
 	}
 	for _, p := range []string{
 		"root@localhost", "buckety@%", "keycloak@%", "b_x", "@%", "b_x@",
-		"b_x@'%'", "b_x@%' OR 1=1", "b_x@% ", "B_x@%", "b_@%", "mysql.sys@localhost",
+		"b_x@'%'", "b_x@%' OR 1=1", "b_x@% ", "B_x@%", "b_@%", "mysql.sys@localhost", "b_x@LOCALHOST",
 	} {
 		if _, err := d.parsePrincipal(p); err == nil {
 			t.Errorf("parsePrincipal(%q) accepted", p)

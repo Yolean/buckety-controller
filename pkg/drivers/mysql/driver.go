@@ -193,8 +193,11 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 	if err != nil {
 		if created {
 			// Nothing records a user created in a failed pass: drop
-			// it, the next pass creates it again.
-			_ = d.conn.exec(ctx, dropUserSQL, acct.User, acct.Host)
+			// it, the next pass creates it again. Detached from ctx,
+			// which may be what failed.
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dialTimeout)
+			_ = d.conn.exec(cctx, dropUserSQL, acct.User, acct.Host)
+			cancel()
 		}
 		return registry.GrantResult{}, err
 	}
@@ -270,10 +273,10 @@ func (d *Driver) setPassword(ctx context.Context, acct account, password string)
 		return true, nil
 	}
 	if !isMySQLError(err, erCannotUser) {
-		return false, fmt.Errorf("mysql: create user %s: %w", acct, redact(err, password))
+		return false, fmt.Errorf("mysql: create user %s: %w", acct, statementError(err, password))
 	}
 	if err := d.conn.exec(ctx, alterUserSQL, acct.User, acct.Host, password); err != nil {
-		return false, fmt.Errorf("mysql: set password of %s: %w", acct, redact(err, password))
+		return false, fmt.Errorf("mysql: set password of %s: %w", acct, statementError(err, password))
 	}
 	return false, nil
 }

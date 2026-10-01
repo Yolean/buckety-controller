@@ -29,8 +29,10 @@ var (
 	// only, so lower_case_table_names cannot alias two names.
 	nameRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
 	// hostRE covers host names, IPs, netmasks and the % and _
-	// wildcards an operator may use in userHost.
-	hostRE = regexp.MustCompile(`^[A-Za-z0-9.%_:/-]+$`)
+	// wildcards an operator may use in userHost. Lowercase only:
+	// servers store hosts lowercased, and the login check compares
+	// CURRENT_USER() exactly.
+	hostRE = regexp.MustCompile(`^[a-z0-9.%_:/-]+$`)
 	// k8sPartRE is a namespace or name usable verbatim in a user
 	// name: Kubernetes characters without dots.
 	k8sPartRE = regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -58,7 +60,7 @@ func checkPrefix(p string) error {
 
 func checkHost(h string) error {
 	if h == "" || len(h) > maxHostLen || !hostRE.MatchString(h) {
-		return fmt.Errorf("host %q must be 1-%d characters of letters, digits and . %% _ : / -", h, maxHostLen)
+		return fmt.Errorf("host %q must be 1-%d characters of lowercase letters, digits and . %% _ : / -", h, maxHostLen)
 	}
 	return nil
 }

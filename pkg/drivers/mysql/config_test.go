@@ -88,6 +88,7 @@ func TestDecodeConfigErrors(t *testing.T) {
 		"system prefix":         base + "namePrefix: performance_\n",
 		"admin inside prefix":   "host: db\nadminUser: b_admin\nadminPassword: ${MYSQL_BUCKETY_PASSWORD}\n",
 		"bad userHost":          base + "userHost: \"%' OR 1\"\n",
+		"uppercase userHost":    base + "userHost: DB.example\n",
 		"tls unknown field":     base + "tls:\n  insecure: true\n",
 	}
 	for name, y := range cases {
@@ -99,6 +100,17 @@ func TestDecodeConfigErrors(t *testing.T) {
 		if strings.Contains(err.Error(), testAdminPassword) {
 			t.Errorf("%s: error contains the admin password", name)
 		}
+	}
+}
+
+func TestAdminPasswordLineBreak(t *testing.T) {
+	t.Setenv("MYSQL_BUCKETY_PASSWORD", testAdminPassword+"\n")
+	_, err := decodeConfig(rawConfig(t, "host: db\nadminUser: buckety\nadminPassword: ${MYSQL_BUCKETY_PASSWORD}\n"))
+	if err == nil || !strings.Contains(err.Error(), "line break") {
+		t.Fatalf("trailing newline accepted: %v", err)
+	}
+	if strings.Contains(err.Error(), testAdminPassword) {
+		t.Fatal("error contains the admin password")
 	}
 }
 

@@ -24,11 +24,14 @@ buckety_account() (
     echo "buckety-account: $password_file is missing or empty" >&2
     exit 1
   fi
-  password="$(cat "$password_file")"
+  # Keep a trailing newline, so the check below refuses it: the
+  # controller's env gets the Secret verbatim and would not match.
+  password="$(cat "$password_file"; printf x)"
+  password="${password%x}"
   # The driver's rule for passwords: characters that need no
   # escaping inside a SQL string literal.
   if [ ${#password} -lt 16 ] || [ ${#password} -gt 128 ] || [[ "$password" =~ [^A-Za-z0-9._~-] ]]; then
-    echo "buckety-account: the password must be 16-128 characters of A-Z a-z 0-9 . _ ~ -" >&2
+    echo "buckety-account: the password must be 16-128 characters of A-Z a-z 0-9 . _ ~ - and no trailing newline" >&2
     exit 1
   fi
   if [[ ! "$user" =~ ^[A-Za-z0-9]{1,32}$ ]]; then

@@ -92,6 +92,10 @@ func (c *Config) validate() error {
 		return fmt.Errorf("missing required field %q", "adminUser")
 	case c.AdminPassword == "":
 		return fmt.Errorf("missing required field %q", "adminPassword")
+	case strings.ContainsAny(c.AdminPassword, "\r\n"):
+		// The usual cause is a Secret created from a file that ends
+		// in a newline; the bootstrap script refuses those too.
+		return fmt.Errorf("adminPassword contains a line break; recreate its Secret without a trailing newline")
 	}
 	if err := checkPrefix(c.NamePrefix); err != nil {
 		return err
