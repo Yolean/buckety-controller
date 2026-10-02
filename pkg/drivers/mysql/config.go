@@ -112,8 +112,9 @@ func (c *Config) validate() error {
 // Connection timeouts. Reads are generous because DROP DATABASE on
 // a large database returns only when the files are gone.
 const (
-	dialTimeout = 10 * time.Second
-	ioTimeout   = 60 * time.Second
+	dialTimeout     = 10 * time.Second
+	ioTimeout       = 60 * time.Second
+	lockWaitTimeout = 50 * time.Second
 )
 
 // clientConfig builds the go-sql-driver config for the admin
@@ -133,6 +134,14 @@ func (c *Config) clientConfig() (*gomysql.Config, error) {
 	mc.WriteTimeout = ioTimeout
 	mc.InterpolateParams = true
 	mc.Collation = "utf8mb4_general_ci"
+	// The server gives up on a metadata lock before the client
+	// gives up on the reply. DROP DATABASE waits for open
+	// transactions on the database (consumer sessions outlive
+	// DROP USER), by default for a day on MariaDB and a year on
+	// MySQL; without this, each timed-out retry would queue
+	// another DROP behind them, and the pending lock blocks new
+	// queries on that database.
+	mc.Params = map[string]string{"lock_wait_timeout": strconv.Itoa(int(lockWaitTimeout / time.Second))}
 	if c.TLS != nil {
 		tc := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: c.TLS.ServerName}
 		if tc.ServerName == "" {

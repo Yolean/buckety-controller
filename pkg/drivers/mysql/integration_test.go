@@ -32,6 +32,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	gomysql "github.com/go-sql-driver/mysql"
 
@@ -289,6 +290,28 @@ func TestIntegration(t *testing.T) {
 		denied(t, connect(t, rw.SecretData), "INSERT INTO items (id, name) VALUES (4, 'four')")
 		grant(t, rwReq, rw.SecretData)
 		mustExec(t, connect(t, rw.SecretData), "INSERT INTO items (id, name) VALUES (4, 'four')")
+	})
+
+	step("a downgrade to Writer drops the user, and back restores it", func(t *testing.T) {
+		toWriter := rwReq
+		toWriter.Role, toWriter.ExistingSecretData = "Writer", rw.SecretData
+		if _, err := d.GrantAccess(ctx, toWriter); err == nil {
+			t.Fatal("Writer accepted")
+		}
+		loginDenied(t, rw.SecretData)
+		back := grant(t, rwReq, rw.SecretData)
+		if string(back.SecretData["password"]) != string(rw.SecretData["password"]) {
+			t.Fatal("the Secret's password was not kept")
+		}
+		mustExec(t, connect(t, rw.SecretData), "INSERT INTO items (id, name) VALUES (6, 'six')")
+		mustExec(t, connect(t, rw.SecretData), "DELETE FROM items WHERE id = 6")
+	})
+
+	step("the server enforces the lock wait timeout", func(t *testing.T) {
+		var v int
+		if err := admin.QueryRowContext(ctx, "SELECT @@SESSION.lock_wait_timeout").Scan(&v); err != nil || v != int(lockWaitTimeout/time.Second) {
+			t.Fatalf("lock_wait_timeout = %d, %v", v, err)
+		}
 	})
 
 	step("deleting the Secret rotates the password", func(t *testing.T) {

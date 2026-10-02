@@ -165,10 +165,6 @@ func (d *Driver) DeleteBuckety(ctx context.Context, req registry.DeleteRequest) 
 // Secret keys: host, port, database (resource-type key), username,
 // password, jdbcUrl, url.
 func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (registry.GrantResult, error) {
-	want, err := rolePrivileges(req.Role)
-	if err != nil {
-		return registry.GrantResult{}, err
-	}
 	db := req.BucketyName
 	if err := d.checkDatabase(db); err != nil {
 		return registry.GrantResult{}, fmt.Errorf("mysql: %w", err)
@@ -178,6 +174,19 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 		return registry.GrantResult{}, err
 	}
 	acct := account{User: user, Host: d.cfg.UserHost}
+
+	want, err := rolePrivileges(req.Role)
+	if err != nil {
+		// An access with no grant set holds nothing. Its user may
+		// exist from an earlier role, and refusing without dropping
+		// it would leave a downgrade to Writer with ReadWrite's
+		// grants and a working Secret. Changing the role back
+		// recreates the user with the Secret's password.
+		if derr := d.conn.exec(ctx, dropUserSQL, acct.User, acct.Host); derr != nil {
+			return registry.GrantResult{}, fmt.Errorf("%w; dropping the user %s it may hold from an earlier role failed: %v", err, acct, derr)
+		}
+		return registry.GrantResult{}, err
+	}
 
 	password, fromSecret := string(req.ExistingSecretData["password"]), true
 	if password == "" {

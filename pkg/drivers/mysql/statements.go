@@ -27,7 +27,7 @@ func rolePrivileges(role string) ([]string, error) {
 	case "", "ReadWrite":
 		return readWritePrivileges, nil
 	case "Writer":
-		return nil, fmt.Errorf("mysql: role Writer is not supported; use Reader (SELECT) or ReadWrite (data and schema changes)")
+		return nil, fmt.Errorf("mysql: role Writer is not supported, and the access holds no user; use Reader (SELECT) or ReadWrite (data and schema changes)")
 	default:
 		return nil, fmt.Errorf("mysql: unknown role %q", role)
 	}

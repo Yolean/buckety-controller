@@ -548,8 +548,6 @@ func TestGrantKeepsPasswordOutOfErrors(t *testing.T) {
 
 func TestGrantRefusals(t *testing.T) {
 	cases := map[string]registry.GrantRequest{
-		"Writer role":      grantReq("Writer", nil),
-		"unknown role":     grantReq("Admin", nil),
 		"database outside": {BucketyName: "keycloak", AccessNamespace: "t1", AccessName: "app", Role: "ReadWrite"},
 		"system database":  {BucketyName: "mysql", AccessNamespace: "t1", AccessName: "app", Role: "ReadWrite"},
 		"no access name":   {BucketyName: "b_t1_orders", Role: "ReadWrite"},
@@ -569,6 +567,29 @@ func TestGrantRefusals(t *testing.T) {
 		if strings.Contains(err.Error(), "DROP USER root") {
 			t.Errorf("%s: error echoes the Secret's password", name)
 		}
+	}
+}
+
+// A refused role holds no user: a downgrade to Writer must not keep
+// the grants of the earlier role.
+func TestGrantUnsupportedRoleDropsUser(t *testing.T) {
+	for _, role := range []string{"Writer", "Admin"} {
+		fc := &fakeConn{}
+		_, err := testDriver(fc).GrantAccess(context.Background(), grantReq(role, withPassword(secretPassword)))
+		if err == nil || !strings.Contains(err.Error(), role) {
+			t.Fatalf("%s: want a role error, got %v", role, err)
+		}
+		if len(fc.execs) != 1 || fc.execs[0].query != dropUserSQL || !slices.Equal(fc.execs[0].args, []any{"b_t1_app", "%"}) {
+			t.Fatalf("%s: statements %q", role, fc.queries())
+		}
+		if len(fc.loginCalls) != 0 {
+			t.Errorf("%s: logged in", role)
+		}
+	}
+	fc := &fakeConn{onExec: func(string, []any) error { return errors.New("connection refused") }}
+	_, err := testDriver(fc).GrantAccess(context.Background(), grantReq("Writer", nil))
+	if err == nil || !strings.Contains(err.Error(), "Writer") || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("a failed drop should be reported with the role error: %v", err)
 	}
 }
 

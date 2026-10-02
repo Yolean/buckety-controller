@@ -144,6 +144,9 @@ func TestClientConfig(t *testing.T) {
 	if mc, _ := c.clientConfig(); mc.Addr != "[fd00::1]:3306" {
 		t.Errorf("IPv6 addr = %s", mc.Addr)
 	}
+	if mc.Params["lock_wait_timeout"] != "50" || lockWaitTimeout >= ioTimeout {
+		t.Errorf("lock_wait_timeout %q must be set and below the read timeout %s", mc.Params["lock_wait_timeout"], ioTimeout)
+	}
 }
 
 func TestClientConfigTLS(t *testing.T) {
