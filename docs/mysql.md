@@ -120,15 +120,16 @@ Privileges are granted on the one database, by its escaped name
 | `ReadWrite` (default) | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES` |
 | `Writer` | refused: `Ready=False`, reason `GrantFailed`, no Secret |
 
-ReadWrite includes the DDL that schema migrations need (an application
-that migrates its own schema on startup, as Keycloak does). Database-level `DROP` and
-`CREATE` also let a ReadWrite user drop its own database, or
-recreate it; nothing beyond it. On every reconcile the driver
-grants what is missing and revokes everything else the user holds
-on the database by its exact name, including privileges granted out
-of band (`EXECUTE`, `CREATE VIEW`, ...) and `GRANT OPTION`. Grants
-it cannot see are listed under *Known limitations*. `Scoped` is
-true, so `ScopingNotImplemented` never surfaces for this driver.
+ReadWrite includes the DDL that schema migrations need (an
+application that migrates its own schema on startup, as Keycloak
+does). Database-level `DROP` and `CREATE` also let a ReadWrite
+user drop its own database, or recreate it; nothing beyond it.
+On every reconcile the driver grants what is missing and revokes
+everything else the user holds on the database by its exact
+name, including privileges granted out of band (`EXECUTE`,
+`CREATE VIEW`, ...) and `GRANT OPTION`. Grants it cannot see are
+listed under *Known limitations*. `Scoped` is true, so
+`ScopingNotImplemented` never surfaces for this driver.
 
 ## Credentials and drift
 
@@ -235,8 +236,8 @@ RSA key unauthenticated before sending the password; configure
 
 ## Design decisions
 
-1. **Roles.** ReadWrite includes DDL; no separate Owner
-   role. The CRD's `Writer` is refused rather than given a guessed
+1. **Roles.** ReadWrite includes DDL; no separate Owner role.
+   The CRD's `Writer` is refused rather than given a guessed
    meaning; a DML-only Writer (`SELECT, INSERT, UPDATE, DELETE`) is
    the obvious candidate if one is wanted.
 2. **Naming.** Literal prefix in `spec.name`, validated, 64

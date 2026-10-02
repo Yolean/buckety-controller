@@ -148,9 +148,8 @@ func TestParseLifecycle(t *testing.T) {
 		t.Errorf("rule[1].numNewerVersions: %d", r1.Condition.NumNewerVersions)
 	}
 
-	// The blobs-per-org data plane's exact shape (checkit
-	// cluster-g2/buckety-controller/GCS_DRIVER_REQUIREMENTS_FROM_BLOBS.md
-	// must-have 3): multiple concurrent matchesPrefix rules.
+	// A data plane that expires each prefix on its own schedule:
+	// multiple concurrent matchesPrefix rules.
 	blobs := `{"rule": [
 	  {"action": {"type": "Delete"}, "condition": {"age": 7, "matchesPrefix": ["board-prints/"]}},
 	  {"action": {"type": "Delete"}, "condition": {"age": 1, "matchesPrefix": [".staging/"]}}
