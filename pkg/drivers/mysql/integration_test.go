@@ -2,7 +2,9 @@ package mysql
 
 // Integration test against a real MariaDB or MySQL server, skipped
 // unless BUCKETY_MYSQL_TEST_DSN holds the controller account's DSN
-// in go-sql-driver form, for an account set up as in docs/mysql.md:
+// in go-sql-driver form, for an account set up as in docs/mysql.md.
+// test/integration/mysql.sh runs it against every supported server
+// in Docker, as CI does; against a server of your own:
 //
 //	BUCKETY_MYSQL_TEST_DSN="buckety:${PW}@tcp(127.0.0.1:3306)/" \
 //	  go test ./pkg/drivers/mysql -run TestIntegration -v -count=1
@@ -11,7 +13,8 @@ package mysql
 // account's grant pattern; BUCKETY_MYSQL_TEST_USER_HOST (default %)
 // must admit the address the test connects from;
 // BUCKETY_MYSQL_TEST_ALT_USER_HOST (e.g. 127.0.0.1 through a
-// port-forward) enables the userHost-change step.
+// port-forward, or auto for the address the server sees) enables
+// the userHost-change step.
 //
 // The test creates one database and two users named after a random
 // run id under the prefix, and drops them at the end. It never
@@ -288,6 +291,23 @@ func TestIntegration(t *testing.T) {
 		mustExec(t, connect(t, rw.SecretData), "INSERT INTO items (id, name) VALUES (4, 'four')")
 	})
 
+	step("deleting the Secret rotates the password", func(t *testing.T) {
+		// The re-keyed path: the user exists, its grants are unknown,
+		// and the Reader must still be refused the ReadWrite set.
+		rotated := grant(t, roReq, nil)
+		if rotated.Minted || string(rotated.SecretData["password"]) == string(ro.SecretData["password"]) {
+			t.Fatalf("minted=%v, password changed=%v", rotated.Minted, string(rotated.SecretData["password"]) != string(ro.SecretData["password"]))
+		}
+		loginDenied(t, ro.SecretData)
+		u := connect(t, rotated.SecretData)
+		var n int
+		if err := u.QueryRowContext(ctx, "SELECT COUNT(*) FROM items").Scan(&n); err != nil {
+			t.Fatalf("select after rotation: %v", err)
+		}
+		denied(t, u, "INSERT INTO items (id, name) VALUES (9, 'nine')")
+		ro = rotated
+	})
+
 	step("character set drift is reported, not repaired", func(t *testing.T) {
 		mustExec(t, admin, "ALTER DATABASE "+quoteIdent(db)+" CHARACTER SET latin1 COLLATE latin1_swedish_ci")
 		err := d.EnsureBuckety(ctx, registry.EnsureRequest{Name: db, Parameters: params})
@@ -320,8 +340,24 @@ func TestIntegration(t *testing.T) {
 	})
 
 	// Optional: a userHost other than the default that also admits
-	// the test's address (127.0.0.1 through a port-forward).
-	if alt := os.Getenv("BUCKETY_MYSQL_TEST_ALT_USER_HOST"); alt != "" {
+	// the test's address (127.0.0.1 through a port-forward). "auto"
+	// takes the address the server sees this test connect from.
+	alt := os.Getenv("BUCKETY_MYSQL_TEST_ALT_USER_HOST")
+	if alt == "auto" {
+		var self string
+		if err := admin.QueryRowContext(ctx, "SELECT HOST FROM information_schema.PROCESSLIST WHERE ID = CONNECTION_ID()").Scan(&self); err != nil {
+			t.Fatalf("own address for BUCKETY_MYSQL_TEST_ALT_USER_HOST=auto: %v", err)
+		}
+		if h, _, err := net.SplitHostPort(self); err == nil {
+			self = h
+		}
+		alt = self
+		if alt == cfg.UserHost || checkHost(alt) != nil {
+			t.Logf("connecting from %q: no usable alternative userHost, skipping the userHost change", self)
+			alt = ""
+		}
+	}
+	if alt != "" {
 		step("userHost change moves the account", func(t *testing.T) {
 			altCfg := *cfg
 			altCfg.UserHost = alt

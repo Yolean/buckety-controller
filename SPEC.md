@@ -1198,7 +1198,7 @@ Required CI matrix for v1alpha1:
 | `kadm` | redpanda |
 | `s3`   | versitygw, minio |
 | `gcs`  | fakegcs (fake-gcs-server; covers the JSON-API control plane — real-GCS-only behaviours like HMAC auth enforcement, the 90-day UBLA disable window and the serviceAccounts IAM surface (no iam.googleapis.com or bucket-IAM emulation; unit-tested against an httptest fake instead) are documented, not e2e-gated) |
-| `mysql` | mariadb (MariaDB 10.11; MySQL 8.0 is covered by the driver's integration test, run outside CI) |
+| `mysql` | mariadb (MariaDB 10.11; the driver's integration test covers MariaDB 10.11 and 11.4 and MySQL 8.0 and 8.4 in a separate CI job, `test/integration/mysql.sh`) |
 
 Adding an implementation later (e.g. AWS S3 once the project has
 credentials and a budget) requires no example or harness changes,

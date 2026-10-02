@@ -12,8 +12,10 @@ naming rules and the choices behind them. Setup steps are in
 | `retentionPolicy: Delete` | `DROP DATABASE` (adopted databases are retained, as for every driver) |
 | `BucketyAccess` deletion | `DROP USER`, under every retention policy |
 
-Tested against MariaDB 10.11 and MySQL 8.0 (the integration test
-in `pkg/drivers/mysql/integration_test.go`).
+CI tests it against MariaDB 10.11 and 11.4 and MySQL 8.0 and 8.4
+(`test/integration/mysql.sh`, which runs
+`pkg/drivers/mysql/integration_test.go` against each in Docker),
+and end to end against MariaDB 10.11.
 
 ## The controller's account
 
