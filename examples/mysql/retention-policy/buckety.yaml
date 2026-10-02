@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-mysql.schema.json
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: keep-me
+spec:
+  backend: mysql
+  name: "b_${namespace}_${name}"
+  retentionPolicy: Retain
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: keep-me-db
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-mysql.schema.json
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: drop-me
+spec:
+  backend: mysql
+  name: "b_${namespace}_${name}"
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: drop-me-db

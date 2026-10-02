@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/buckety-mysql.schema.json
+apiVersion: buckety.yolean.se/v1alpha1
+kind: Buckety
+metadata:
+  name: sticky-new
+spec:
+  backend: mysql-renamed
+  name: "b_${namespace}_${name}"
+  # Deleted by the scenario while the renamed backend still exists.
+  retentionPolicy: Delete
+  defaultAccess:
+    role: ReadWrite
+    credentialsSecretName: sticky-new-db

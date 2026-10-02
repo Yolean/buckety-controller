@@ -6,7 +6,7 @@
 #   E2E_NAMESPACE       The namespace the scenario was applied into.
 #   E2E_KUBECONFIG      kubeconfig path (falls back to $KUBECONFIG).
 #   E2E_CONTROLLER_NS   Namespace the buckety-controller runs in (default: buckety).
-#   E2E_IMPLEMENTATION  versitygw | minio | redpanda (informational; some assertions branch on it).
+#   E2E_IMPLEMENTATION  redpanda | versitygw | minio | fakegcs | mariadb (informational; some assertions branch on it).
 #
 # Downstream consumers writing their own platform e2e against
 # buckety-controller: do NOT source this file from outside this
@@ -17,7 +17,8 @@
 #     secret_value, resource_absent
 #
 #   Coupled to this repo's harness (assume namespace/service layout):
-#     kafka_topic_exists, s3_bucket_exists
+#     kafka_topic_exists, s3_bucket_exists, gcs_*, mysql_root,
+#     mysql_database_exists, mysql_login
 #
 # The coupled helpers kubectl-run pods in conventional namespaces
 # (redpanda/, buckety/) reading bootstrap addresses from harness
@@ -471,21 +472,32 @@ backend_stickiness_scenario() {
   log "applying new Buckety against $backend-renamed"
   kc apply -f "$renamed_cr"
   wait_ready buckety/sticky-new 120s
+  # Gone before the original config returns: an access that holds a
+  # principal of its own (mysql users) cannot be revoked once its
+  # backend is unregistered, and would hold up namespace cleanup.
+  kc delete buckety/sticky-new --wait=true --timeout=90s
 
   # Deletion with retentionPolicy=Delete blocks while the backend
   # is missing: removing the finalizer would silently orphan the
-  # backend resource.
+  # backend resource. Where the implicit access holds a principal
+  # of its own (mysql users), it is that access's revoke that
+  # blocks first, and the Buckety waits for it.
   log "deleting sticky-orig while its backend is missing; expecting the deletion to block"
   kc delete buckety/sticky-orig --wait=false
-  local blocked=""
+  local blocked="" access_msg=""
   for _ in $(seq 1 20); do
     blocked="$(kc get buckety/sticky-orig \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)"
     [[ "$blocked" == *"deletion blocked"* ]] && break
+    if [[ "$blocked" == *"to revoke before teardown"* ]]; then
+      access_msg="$(kc get bucketyaccess/sticky-orig \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)"
+      [[ "$access_msg" == *"cannot revoke principal"* ]] && break
+    fi
     sleep 3
   done
-  [[ "$blocked" == *"deletion blocked"* ]] \
-    || fail "sticky-orig deletion did not surface 'deletion blocked' (Ready message: '$blocked')"
+  [[ "$blocked" == *"deletion blocked"* || "$access_msg" == *"cannot revoke principal"* ]] \
+    || fail "sticky-orig deletion did not surface 'deletion blocked' (Ready message: '$blocked', access: '$access_msg')"
   kc get buckety/sticky-orig >/dev/null 2>&1 \
     || fail "sticky-orig disappeared while its backend was missing; the backend resource would be orphaned"
 
@@ -630,4 +642,48 @@ scaled_to_zero_scenario() {
   kcg -n "$E2E_CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
 
   log "scaled-to-zero PASS"
+}
+
+# ---- mysql helpers (coupled camp: assume the e2e MariaDB, a
+# StatefulSet mariadb in namespace mysql whose root connects only
+# on the local socket, as in kubernetes-mysql-cluster) ----
+
+# mysql_root <sql>
+# Runs SQL as root inside the MariaDB pod; prints rows
+# tab-separated without column names.
+mysql_root() {
+  kcg -n "${E2E_MYSQL_NAMESPACE:-mysql}" exec "${E2E_MYSQL_POD:-mariadb-0}" -c mariadb -- \
+    mariadb -uroot --batch --skip-column-names -e "$1"
+}
+
+# mysql_database_exists <database>
+mysql_database_exists() {
+  [[ "$(mysql_root "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '$1'")" == 1 ]]
+}
+
+# mysql_login <secret-name> <sql>
+# Connects over TCP with a Secret's username, password and
+# database and runs SQL. The password travels on stdin, so it is
+# in no command line. Caller checks the exit code.
+mysql_login() {
+  local secret="$1" sql="$2" user db
+  user="$(secret_value "$secret" username)"
+  db="$(secret_value "$secret" database)"
+  secret_value "$secret" password \
+    | kcg -n "${E2E_MYSQL_NAMESPACE:-mysql}" exec -i "${E2E_MYSQL_POD:-mariadb-0}" -c mariadb -- \
+        sh -c 'IFS= read -r MYSQL_PWD || [ -n "$MYSQL_PWD" ]; export MYSQL_PWD; exec mariadb --protocol=tcp -h127.0.0.1 -u"$1" --batch --skip-column-names "$2" -e "$3"' \
+        sh "$user" "$db" "$sql"
+}
+
+# wait_until <timeoutSeconds> <description> <command...>
+# Polls the command every 3s until it succeeds.
+wait_until() {
+  local timeout="$1" what="$2"; shift 2
+  log "waiting up to ${timeout}s for: $what"
+  local deadline=$(( $(date +%s) + timeout ))
+  while (( $(date +%s) < deadline )); do
+    "$@" >/dev/null 2>&1 && return 0
+    sleep 3
+  done
+  fail "not within ${timeout}s: $what"
 }

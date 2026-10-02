@@ -1,0 +1,6 @@
+backends:
+- name: mysql
+  driver: mysql
+  config:
+    adminUser: buckety
+    adminPassword: literal

@@ -1,0 +1,10 @@
+backends:
+- name: mysql
+  driver: mysql
+  config:
+    host: mysql.mysql.svc.cluster.local
+    # The controller's own account must be outside the names it
+    # manages, or it could alter or drop itself.
+    adminUser: b_admin
+    adminPassword: literal
+    namePrefix: b_

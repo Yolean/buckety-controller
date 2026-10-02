@@ -9,7 +9,8 @@ The design and the security model are in
 | `bootstrap/` | Yolean/kubernetes-mysql-cluster `variants/scale-1`, plus the `initdb/` component that creates the controller's account on first boot |
 | `buckety-controller.yaml` | the backend config |
 | `controller-env-patch.yaml` | the controller Deployment env the config reads |
-| `happy-path/`, `multi-consumer/` | e2e scenarios: `Buckety`, `BucketyAccess` and consumer Jobs |
+| `happy-path/`, `multi-consumer/`, `oob-drift/`, `adoption/`, `parameter-mutation/`, `retention-policy/` | e2e scenarios for this driver's behaviour |
+| `backend-stickiness/`, `driver-version/`, `misconfigured-startup/`, `scaled-to-zero/` | e2e scenarios whose bodies every driver shares (`test/e2e/lib.sh`) |
 
 ## 1. Generate the account password once
 
