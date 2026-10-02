@@ -1,8 +1,8 @@
 module github.com/Yolean/buckety-controller
 
-go 1.26.1
+go 1.27.0
 
-toolchain go1.26.5
+toolchain go1.27.1
 
 require (
 	cloud.google.com/go/storage v1.63.1
