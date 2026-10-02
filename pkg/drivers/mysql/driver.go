@@ -139,7 +139,7 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 	}
 	if len(drift) > 0 {
 		return &registry.ErrParameterDrift{Reason: fmt.Sprintf(
-			"database %q %s; the driver does not change an existing database's defaults or convert its tables: ALTER DATABASE (and the tables) out of band, or recreate the Buckety",
+			"database %q %s; the driver does not change an existing database's defaults or convert its tables: ALTER DATABASE (and the tables) out of band and then annotate the Buckety to re-check it, or recreate the Buckety",
 			req.Name, strings.Join(drift, ", "))}
 	}
 	return nil

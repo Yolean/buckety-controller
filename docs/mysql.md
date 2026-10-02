@@ -202,7 +202,10 @@ immutable. The driver never runs `ALTER DATABASE`: it changes the
 default for new tables only, and converging silently would hide
 that existing tables still differ. A database whose defaults differ
 from the parameters (changed out of band, or adopted) surfaces
-`ParameterDrift`; fix it out of band or recreate the `Buckety`.
+`ParameterDrift`, and the controller stops re-checking it until the
+`Buckety` changes. Fix it out of band and then touch the `Buckety`
+(`kubectl annotate buckety/<name> example.com/recheck="$(date +%s)"
+--overwrite`, any annotation will do), or recreate the `Buckety`.
 `utf8` is refused as ambiguous (utf8mb3 today, utf8mb4 later).
 
 ## Adoption and retention
