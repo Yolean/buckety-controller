@@ -47,7 +47,9 @@ spec:
     spec:
       containers:
       - name: minio
-        image: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+        # Yolean's mirror: docker.io/minio/minio no longer serves
+        # anonymous pulls. Its newest release, pinned like the rest.
+        image: ghcr.io/yolean/minio:RELEASE.2025-07-18T21-56-31Z@sha256:da0fe26595711d0fb93dd28e24552520f68897195f4a23f5a17ffa9924ec3fac
         env:
         - name: MINIO_ROOT_USER
           valueFrom:
