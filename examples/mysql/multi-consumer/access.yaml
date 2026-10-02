@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/buckety-controller/main/schema/bucketyaccess.schema.json
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: shared-rw
+spec:
+  bucketyRef:
+    name: shared
+  credentialsSecretName: shared-rw
+  role: ReadWrite
+---
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: shared-reader
+spec:
+  bucketyRef:
+    name: shared
+  credentialsSecretName: shared-reader
+  role: Reader
+---
+# The mysql driver refuses Writer instead of guessing a grant set
+# (docs/mysql.md); this access stays Ready=False/GrantFailed.
+apiVersion: buckety.yolean.se/v1alpha1
+kind: BucketyAccess
+metadata:
+  name: shared-writer
+spec:
+  bucketyRef:
+    name: shared
+  credentialsSecretName: shared-writer
+  role: Writer

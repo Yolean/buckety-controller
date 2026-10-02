@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+spec:
+  template:
+    spec:
+      containers:
+      - name: mariadb
+        volumeMounts:
+        # A file inside the directory, so it also works where the
+        # directory itself is a volume (kubernetes-mysql-cluster
+        # mounts an emptyDir there).
+        - name: buckety-initdb
+          mountPath: /docker-entrypoint-initdb.d/buckety-account.sh
+          subPath: buckety-account.sh
+        - name: buckety-secret
+          mountPath: /run/secrets/buckety
+          readOnly: true
+      volumes:
+      - name: buckety-initdb
+        configMap:
+          name: buckety-initdb
+          defaultMode: 0555
+      - name: buckety-secret
+        secret:
+          secretName: mysql-buckety
+          items:
+          - key: password
+            path: password

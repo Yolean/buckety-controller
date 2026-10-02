@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+#
+# Yolean/kubernetes-mysql-cluster's single-node variant with
+# buckety-controller's account created on first boot. Needs the
+# Secret mysql-buckety (key: password) in this namespace; see
+# examples/mysql/README.md. Other variants (scale-2, the 3-node
+# base) take the same component: Galera replicates the account.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mysql
+resources:
+- github.com/Yolean/kubernetes-mysql-cluster/variants/scale-1?ref=ab10e04c7a15c86d7cd8ff94cabf73984113c8af
+components:
+- initdb

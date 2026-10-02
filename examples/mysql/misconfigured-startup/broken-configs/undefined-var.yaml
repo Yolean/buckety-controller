@@ -1,0 +1,7 @@
+backends:
+- name: mysql
+  driver: mysql
+  config:
+    host: mysql.mysql.svc.cluster.local
+    adminUser: buckety
+    adminPassword: ${BUCKETY_E2E_UNSET_VAR}

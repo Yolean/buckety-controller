@@ -1,11 +1,11 @@
 # buckety-controller
 
 A small in-cluster operator that provisions named resources on
-backing services (Kafka topics, S3 buckets) and mints
-`secretKeyRef`-friendly credentials Secrets for consumers.
+backing services (Kafka topics, S3 buckets, MySQL databases) and
+mints `secretKeyRef`-friendly credentials Secrets for consumers.
 
-> **Status: v1alpha1 shipped.** Three drivers (`kadm`, `s3`,
-> `gcs`) are implemented and covered by the e2e suite in CI. Every commit on
+> **Status: v1alpha1 shipped.** Four drivers (`kadm`, `s3`,
+> `gcs`, `mysql`) are implemented and covered by the e2e suite in CI. Every commit on
 > `main` pins a reproducible image build in
 > [`deploy/kustomize/release/`](./deploy/kustomize/release), and
 > the same digest is pushed to `ghcr.io/yolean/buckety-controller`
@@ -56,16 +56,17 @@ here. The deviations are operational, not architectural:
 
 ## Status
 
-v1alpha1. Three drivers shipped:
+v1alpha1. Four drivers shipped:
 
 | Driver | Backing services | Notes |
 | --- | --- | --- |
 | `kadm` | Kafka-protocol brokers (Redpanda, Apache Kafka, Confluent) | Topic create/alter/delete. v1alpha1: no per-consumer SASL/SCRAM scoping. |
 | `s3` | S3-compatible (VersityGW, MinIO, AWS S3, Cloudflare R2, Hetzner, GCS interop) | Bucket create/delete. v1alpha1: all consumers receive the backend's root keys. |
 | `gcs` | Google Cloud Storage via the native JSON API | Bucket create/update/delete with location, uniform bucket-level access, versioning and lifecycle parameters. Access Secrets carry a static HMAC pair (S3-protocol data path); all consumers receive the same pair. Driver 0.2 adds opt-in per-bucket service accounts (`parameters.serviceAccount`): a bucket-scoped GCP SA whose key JSON lands in each access Secret for OAuth2 bearer-token auth (`examples/gcs/service-account/`). |
+| `mysql` | MariaDB 10.11+ and MySQL 8 | Database create/drop with `characterSet` and `collation` parameters. Each access gets its own user, with grants for its role on that one database (`Reader`: `SELECT`; `ReadWrite`: data and schema changes). Every name is confined to the backend's `namePrefix`; see [`docs/mysql.md`](./docs/mysql.md) for the account it needs and why. |
 
 e2e coverage in CI runs against Redpanda (`kadm`), VersityGW +
-MinIO (`s3`) and fake-gcs-server (`gcs`). The other listed S3
+MinIO (`s3`), fake-gcs-server (`gcs`) and MariaDB (`mysql`). The other listed S3
 backends share the same client library and the same e2e shape; if
 you hit a compatibility issue with one of them, please file an
 issue. For `gcs`, behaviours the emulator cannot exercise (HMAC
@@ -202,7 +203,23 @@ backends:
     # examples/gcs/service-account/ for required grants.
     # serviceAccounts:
     #   project: my-buckety-identities
+
+- name: cluster-mysql
+  driver: mysql
+  config:
+    host: mysql.mysql.svc.cluster.local
+    adminUser: buckety
+    adminPassword: ${MYSQL_BUCKETY_PASSWORD}
+    # Every database and user the driver touches starts with this;
+    # the account's grants are scoped to it. See docs/mysql.md.
+    namePrefix: b_
 ```
+
+The mysql backend's account and its first-boot creation from a
+Secret are in [`examples/mysql/`](./examples/mysql). `CREATE USER`
+cannot be scoped by name on MariaDB or MySQL, so the driver refuses
+every database and user outside `namePrefix`; keep accounts that
+matter on an instance the controller has no backend for.
 
 Access Secrets carry the S3-interop `endpoint` (a bare host - the
 scheme is the consumer's choice) and `region`, derived per bucket
@@ -356,16 +373,19 @@ explicit `BucketyAccess` in a second apply, if zero-gap matters.
 See [`SPEC.md`](./SPEC.md#implicit-access-defaultaccess) for the
 full lifecycle.
 
-> **`role` is advisory in v1alpha1.** `BucketyAccess.spec.role`
-> accepts `Reader`, `Writer`, or `ReadWrite`, but the v1alpha1
-> kadm and s3 drivers do not yet scope credentials per role.
+> **`role` is advisory in v1alpha1, except for `mysql`.**
+> `BucketyAccess.spec.role` accepts `Reader`, `Writer`, or
+> `ReadWrite`, but the v1alpha1 kadm, s3 and gcs drivers do not yet
+> scope credentials per role.
 > Every Secret minted for the same `Buckety` carries identical
 > root credentials regardless of `role`. The controller surfaces
 > a `ScopingNotImplemented=True` condition on each affected
 > `BucketyAccess` (visible via `kubectl describe bucketyaccess`)
 > so the gap is honest, not silent. Scoped credentials
 > (SASL/SCRAM, IAM users) are v1alpha2 work. Until then, treat
-> `role` as documentation of intent, not enforcement.
+> `role` as documentation of intent, not enforcement. The `mysql`
+> driver does enforce it: each access is its own database user with
+> grants for its role, and `Writer` is refused.
 
 S3 is the same shape; see [`examples/s3/`](./examples/s3).
 
@@ -386,13 +406,14 @@ are in [`SPEC.md`](./SPEC.md#naming-templates).
 
 ## Resources
 
-- `Buckety` — a topic / bucket / future-MySQL-database. Selects
+- `Buckety` — a topic / bucket / MySQL database. Selects
   a backend by name. Carries mutable parameters; the controller
   reconciles drift to the backing service.
 - `BucketyAccess` — a Secret request. Each one mints exactly one
   Secret in the same namespace as the `BucketyAccess`. Multiple
   accesses can target the same Buckety (in v1alpha1 they all
-  receive identical credentials).
+  receive identical credentials, except with `mysql`, where each
+  gets its own user).
 
 Both kinds are namespaced. Cross-namespace `bucketyRef` is not
 supported in v1alpha1.
@@ -491,9 +512,8 @@ Auto-migration is not in v1alpha1.
 
 The full list is in [`SPEC.md`](./SPEC.md). Highlights:
 
-- No per-consumer credential scoping. SASL/SCRAM and IAM-user
-  minting are v1alpha2 work.
-- No MySQL driver.
+- No per-consumer credential scoping, except in the `mysql`
+  driver. SASL/SCRAM and IAM-user minting are v1alpha2 work.
 - No cross-namespace `bucketyRef`.
 - No hot-reload of `buckety-controller.yaml`.
 

@@ -21,8 +21,8 @@
           },
           "driver": {
             "type": "string",
-            "enum": ["kadm", "s3", "gcs"],
-            "description": "Registered driver name. The compiled-in set for this repo's binary is kadm, s3 and gcs."
+            "enum": ["kadm", "s3", "gcs", "mysql"],
+            "description": "Registered driver name. The compiled-in set for this repo's binary is kadm, s3, gcs and mysql."
           },
           "config": {
             "type": "object",

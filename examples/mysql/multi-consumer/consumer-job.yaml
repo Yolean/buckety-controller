@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shared-roles
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: roles
+        image: ghcr.io/yolean/mariadb:10.11.19-jammy@sha256:7f22313fc130a377a44999965bcb0a08dd5b21e8502824c1b864f792f9bc66ab
+        env:
+        - name: DB_HOST
+          valueFrom: { secretKeyRef: { name: shared-rw, key: host } }
+        - name: DB_PORT
+          valueFrom: { secretKeyRef: { name: shared-rw, key: port } }
+        - name: DB_NAME
+          valueFrom: { secretKeyRef: { name: shared-rw, key: database } }
+        - name: RW_USER
+          valueFrom: { secretKeyRef: { name: shared-rw, key: username } }
+        - name: RW_PASSWORD
+          valueFrom: { secretKeyRef: { name: shared-rw, key: password } }
+        - name: RO_USER
+          valueFrom: { secretKeyRef: { name: shared-reader, key: username } }
+        - name: RO_PASSWORD
+          valueFrom: { secretKeyRef: { name: shared-reader, key: password } }
+        command: [bash, -ec]
+        args:
+        - |
+          rw() { MYSQL_PWD="$RW_PASSWORD" mariadb -h"$DB_HOST" -P"$DB_PORT" -u"$RW_USER" -N -B "$DB_NAME" -e "$1"; }
+          ro() { MYSQL_PWD="$RO_PASSWORD" mariadb -h"$DB_HOST" -P"$DB_PORT" -u"$RO_USER" -N -B "$DB_NAME" -e "$1"; }
+          rw "CREATE TABLE IF NOT EXISTS t (id INT PRIMARY KEY)"
+          rw "REPLACE INTO t VALUES (1)"
+          [ "$(ro 'SELECT COUNT(*) FROM t')" = 1 ]
+          if ro "INSERT INTO t VALUES (2)" 2>/tmp/err; then echo "Reader could INSERT" >&2; exit 1; fi
+          grep -q "command denied" /tmp/err
+          if ro "CREATE TABLE t2 (id INT)" 2>/tmp/err; then echo "Reader could CREATE" >&2; exit 1; fi
+          grep -q "command denied" /tmp/err
+          echo "roles enforced"

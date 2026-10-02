@@ -8,7 +8,7 @@
 # cluster with backing services available.
 #
 # Inputs (env):
-#   IMPLEMENTATIONS    Comma-separated. Default: redpanda,versitygw,minio,fakegcs.
+#   IMPLEMENTATIONS    Comma-separated. Default: redpanda,versitygw,minio,fakegcs,mariadb.
 #                      Each maps via $IMPL_DRIVER below to a driver.
 #   SCENARIOS          Optional comma-separated scenario directory
 #                      names (e.g. adoption,backend-stickiness) to run
@@ -58,7 +58,7 @@ HERE="$(here)"
 REPO="$(cd "$HERE/../.." && pwd)"
 CONTROLLER_NS="${CONTROLLER_NS:-buckety}"
 KEEP_FAILED="${KEEP_FAILED:-false}"
-IMPLEMENTATIONS="${IMPLEMENTATIONS:-redpanda,versitygw,minio,fakegcs}"
+IMPLEMENTATIONS="${IMPLEMENTATIONS:-redpanda,versitygw,minio,fakegcs,mariadb}"
 
 # Map implementation -> driver. Scenario discovery uses this to
 # pick which examples/<driver>/* to run for each implementation.
@@ -67,6 +67,7 @@ declare -A IMPL_DRIVER=(
   [versitygw]=s3
   [minio]=s3
   [fakegcs]=gcs
+  [mariadb]=mysql
 )
 # Map implementation -> the backend name its config declares for
 # the driver-agnostic scenarios. backend-stickiness renames it to
@@ -77,6 +78,7 @@ declare -A IMPL_BACKEND=(
   [versitygw]=s3
   [minio]=s3
   [fakegcs]=gcs
+  [mariadb]=mysql
 )
 
 log() { printf '[run.sh] %s\n' "$*" >&2; }

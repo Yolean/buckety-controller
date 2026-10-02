@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+#
+# Adds buckety-account.sh to /docker-entrypoint-initdb.d of the
+# StatefulSet "mariadb" (container "mariadb") and mounts the Secret
+# mysql-buckety it reads the password from. The entrypoint runs the
+# script only when it initialises an empty data directory; for an
+# existing instance, run the same three statements by hand.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+configMapGenerator:
+- name: buckety-initdb
+  files:
+  - buckety-account.sh
+patches:
+- path: statefulset-patch.yaml
+  target:
+    kind: StatefulSet
+    name: mariadb

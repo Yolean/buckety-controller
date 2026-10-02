@@ -46,6 +46,7 @@ import (
 	// this import list.
 	_ "github.com/Yolean/buckety-controller/pkg/drivers/gcs"
 	_ "github.com/Yolean/buckety-controller/pkg/drivers/kadm"
+	_ "github.com/Yolean/buckety-controller/pkg/drivers/mysql"
 	_ "github.com/Yolean/buckety-controller/pkg/drivers/s3"
 )
 

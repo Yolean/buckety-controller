@@ -1,0 +1,7 @@
+backends:
+- name: mysql
+  driver: mysql
+  config:
+    hots: mysql.mysql.svc.cluster.local
+    adminUser: buckety
+    adminPassword: literal

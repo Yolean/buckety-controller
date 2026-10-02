@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "mysql driver backend config",
+  "description": "Schema for the config: block under a backend entry whose driver is mysql (MariaDB 10.11+, MySQL 8). The controller connects with the admin account below; every database and user it manages starts with namePrefix, and it refuses names outside it. See docs/mysql.md for the grants the admin account needs and why CREATE USER makes the prefix the security boundary.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["host", "adminUser", "adminPassword"],
+  "properties": {
+    "host": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Server host name or IP, without scheme or port, e.g. mysql.mysql.svc.cluster.local. Also written to access Secrets (host, jdbcUrl, url)."
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 3306,
+      "description": "Server port. Also written to access Secrets."
+    },
+    "adminUser": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The controller's account. Must not start with namePrefix. envsubst:\"true\" - supports ${VAR} interpolation at controller startup."
+    },
+    "adminPassword": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The controller's password; use ${VAR} interpolation from a Secret-sourced env var rather than a literal. A line break is a startup error (the usual cause is a Secret created from a file with a trailing newline). envsubst:\"true\"."
+    },
+    "namePrefix": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]{0,8}_$",
+      "default": "b_",
+      "description": "Every database and user the driver creates or touches starts with this prefix; Buckety names (spec.name) must resolve to it, e.g. b_${namespace}_${name}. The admin account's database grant is scoped to the same prefix (GRANT ALL ON `b\\_%`.*). Fixed for the backend's lifetime: resources stamped under one prefix are refused under another."
+    },
+    "userHost": {
+      "type": "string",
+      "pattern": "^[a-z0-9.%_:/-]{1,255}$",
+      "default": "%",
+      "description": "Host part of created accounts ('user'@'<userHost>'), lowercase as the server stores it. Must also admit the controller's own address: the driver verifies passwords and grants by logging in as each user. Changing it moves accesses to new accounts on their next reconcile and drops the old ones."
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Present (even as {}) to require verified TLS on the controller's connections. Absent means plaintext. Does not add REQUIRE SSL to created users; enforce TLS for consumers server-side with require_secure_transport.",
+      "properties": {
+        "caFile": {
+          "type": "string",
+          "description": "PEM bundle (mounted into the controller Pod) to verify the server certificate with. System roots when omitted."
+        },
+        "serverName": {
+          "type": "string",
+          "description": "Name to verify in the server certificate. Defaults to host."
+        }
+      }
+    }
+  }
+}

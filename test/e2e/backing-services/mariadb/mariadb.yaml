@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+spec:
+  selector:
+    app: mariadb
+  ports:
+  - port: 3306
+    targetPort: 3306
+    name: mysql
+---
+# Named and shaped like kubernetes-mysql-cluster's StatefulSet
+# (mariadb/mariadb, root only on localhost) so the initdb component
+# patches both, but with an emptyDir data directory and no Galera.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      containers:
+      - name: mariadb
+        image: ghcr.io/yolean/mariadb:10.11.19-jammy@sha256:7f22313fc130a377a44999965bcb0a08dd5b21e8502824c1b864f792f9bc66ab
+        env:
+        - name: MYSQL_ROOT_HOST
+          value: localhost
+        - name: MYSQL_ALLOW_EMPTY_PASSWORD
+          value: "yes"
+        - name: MYSQL_INITDB_SKIP_TZINFO
+          value: "yes"
+        ports:
+        - containerPort: 3306
+          name: mysql
+        # TCP, not mysqladmin over the socket: the entrypoint's
+        # first-boot server is socket-only, and Ready must mean the
+        # account exists and the real server listens.
+        readinessProbe:
+          tcpSocket:
+            port: 3306
+          periodSeconds: 3
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: data
+        emptyDir: {}

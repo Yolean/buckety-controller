@@ -14,8 +14,8 @@ the two disagree, this file wins until both are revised together.
 ## Context
 
 Buckety provisions named, individually-configurable resources on
-backing services (Kafka topics, S3 buckets, future: MySQL
-databases) and mints per-consumer credentials.
+backing services (Kafka topics, S3 buckets, MySQL databases) and
+mints per-consumer credentials.
 
 The design is informed by a Yolean exploration of the Container
 Object Storage Interface (COSI). COSI's two-resource split
@@ -73,13 +73,14 @@ classes — they pick the named thing their cluster offers.
 | `kadm` | Kafka-protocol topics (Redpanda, Apache Kafka, Confluent) | `github.com/twmb/franz-go/pkg/kadm` | Redpanda |
 | `s3` | S3 API (VersityGW, MinIO, AWS S3, R2, Hetzner, GCS interop) | `github.com/aws/aws-sdk-go-v2/service/s3` | VersityGW + MinIO |
 | `gcs` | Google Cloud Storage, provisioned via the native JSON API | `cloud.google.com/go/storage` | fake-gcs-server |
+| `mysql` | MariaDB and MySQL databases, one user per access | `github.com/go-sql-driver/mysql` | MariaDB |
 
 Driver names are short, semantic, and stable; they MUST NOT
-change after v1alpha1 ships. New drivers — `mysql` via
-`go-sql-driver/mysql`, `minio-admin` for scoped MinIO IAM,
-`versitygw-iam` for scoped VersityGW IAM — are follow-ups, not
-v1alpha1. The `gcs` driver shipped as the first such follow-up
-(same v1alpha1 CRDs, additive driver registration).
+change after v1alpha1 ships. New drivers — `minio-admin` for
+scoped MinIO IAM, `versitygw-iam` for scoped VersityGW IAM — are
+follow-ups, not v1alpha1. The `gcs` driver shipped as the first
+such follow-up and `mysql` as the second (same v1alpha1 CRDs,
+additive driver registration).
 
 The `gcs` / `s3` boundary: the s3 driver's client-library bet
 covers GCS on the DATA path (HMAC keys work with SigV4 against
@@ -278,7 +279,9 @@ credentials drawn from the backend's root config. The CRD shape
 already supports per-access scoping for v1alpha2 — drivers are
 expected to ignore role/parameter values they don't yet
 implement and surface a `ScopingNotImplemented` condition rather
-than silently treating Reader as ReadWrite.
+than silently treating Reader as ReadWrite. The mysql driver
+scopes per access and role already, and refuses a role it has no
+grant set for (`Writer`) instead of ignoring it.
 
 ## Implicit access (`defaultAccess`)
 
@@ -568,7 +571,8 @@ applied against minio, versitygw and the GCS emulator.
 
 Subfamily hierarchies (definitions shared by a subset of a
 family) are deferred until a third bucket driver forces the
-question; today the family is flat and small.
+question; today the family is flat and small. `mysql` is not in
+a family; a PostgreSQL driver would make a database family.
 
 ## Schemas
 
@@ -597,7 +601,7 @@ standalone whole-document schemas for editors (the
 kubernetes-json-schema pattern): `buckety.schema.json` plus one
 per family and per driver (`buckety-blobstore` for the
 object-store family, `buckety-gcs`, `buckety-s3`,
-`buckety-kadm`) and `bucketyaccess.schema.json`.
+`buckety-kadm`, `buckety-mysql`) and `bucketyaccess.schema.json`.
 The suffix forms a specialize/generalize ladder walked by
 switching the URL: the family rung accepts only family-common
 parameters, so a resource annotated with it provably stays
@@ -639,11 +643,13 @@ call, guided by the chosen operator SDK.
   (see *`Delete` is recursive*), idempotent on NotFound; called
   only when `retentionPolicy == Delete`.
 - `GrantAccess` — mints credentials, applies backend-side
-  permissions (no-op in v1alpha1 for both shipped drivers),
-  returns the Secret payload as a flat `map[string][]byte`.
-  Idempotent for the same `(Buckety, BucketyAccess)` pair.
+  permissions (no-op in v1alpha1 for kadm and s3; mysql creates
+  a user per access with the role's grants), returns the Secret
+  payload as a flat `map[string][]byte`. Idempotent for the same
+  `(Buckety, BucketyAccess)` pair, which the request identifies
+  by the access's namespace and name.
 - `RevokeAccess` — removes the backend-side principal (no-op in
-  v1alpha1), idempotent on NotFound.
+  v1alpha1 for kadm and s3), idempotent on NotFound.
 - `ValidateParameters` — used by the admission webhook and, with
   the webhook disabled, by the reconciler; returns an error
   naming the offending key.
@@ -720,8 +726,8 @@ identity:
   on the broker.
 - `s3` driver → key `bucket` carrying the resolved bucket name
   on the backend.
-- Future drivers follow the same pattern: `database`,
-  `namespace`, etc.
+- `mysql` driver → key `database` carrying the database name.
+- Future drivers follow the same pattern: `namespace`, etc.
 
 The resource-type key is the unambiguous handle a consumer uses
 to operate on the resource. The other keys (`bootstrap`,
@@ -879,6 +885,48 @@ ever wedges an SA at the key cap, surplus `USER_MANAGED` keys on
 a marker-verified SA are safe to delete server-side and the fleet
 re-mints within one reconcile.
 
+### `mysql` driver
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-db
+  namespace: shop
+type: Opaque
+data:
+  host:     <base64>    # mysql.mysql.svc.cluster.local
+  port:     <base64>    # 3306
+  database: <base64>    # b_shop_orders (resource-type key)
+  username: <base64>    # b_shop_orders (this access's own user)
+  password: <base64>
+  jdbcUrl:  <base64>    # jdbc:mariadb://mysql.mysql.svc.cluster.local:3306/b_shop_orders
+  url:      <base64>    # mysql://<username>:<password>@mysql.mysql.svc.cluster.local:3306/b_shop_orders
+```
+
+Unlike the v1alpha1 kadm and s3 drivers, credentials are scoped:
+each `BucketyAccess` gets a user of its own, named from the
+access's namespace and name, with privileges on its one database
+by role (`Reader`: `SELECT`; `ReadWrite`: data changes plus the DDL
+schema migrations need; `Writer` is refused). `GrantResult.Scoped`
+is true, `status.principal` is `user@host`, and `RevokeAccess`
+drops the user under every retention policy. The password is
+generated at the first grant and read back from the Secret on every
+later one, so a password written into the Secret is applied to the
+server and deleting the Secret rotates it.
+
+**The prefix boundary.** The controller's account needs
+`CREATE USER` globally, which MariaDB and MySQL cannot scope by
+name and which also allows altering and dropping every account on
+the server. The backend's `namePrefix` is therefore the driver's
+security boundary: every database and user name it creates or
+touches must start with it, `spec.name` must resolve to it
+(`b_${namespace}_${name}`), and anything outside it is refused,
+including principals read back from status. Accounts that matter
+belong on instances the controller has no backend for.
+[`docs/mysql.md`](docs/mysql.md) has the account grants, naming
+rules, drift detection and the decisions taken.
+
 ## Adoption
 
 A resolved backend resource name can collide with a resource that
@@ -910,7 +958,8 @@ when the resource already exists:
 - `AdoptEmpty` (default): adopt only when the resource holds no
   live content (no current objects for buckets; noncurrent
   versions and delete markers are not consulted. No retained
-  records for topics; fully expired records count as none).
+  records for topics; fully expired records count as none. No
+  tables, views, routines or events for databases).
   A non-empty resource surfaces `Ready=False` with reason
   `BackendResourceExists`, mints no Secret, stamps nothing, and
   re-checks on the periodic cadence. The message names the
@@ -1149,6 +1198,7 @@ Required CI matrix for v1alpha1:
 | `kadm` | redpanda |
 | `s3`   | versitygw, minio |
 | `gcs`  | fakegcs (fake-gcs-server; covers the JSON-API control plane — real-GCS-only behaviours like HMAC auth enforcement, the 90-day UBLA disable window and the serviceAccounts IAM surface (no iam.googleapis.com or bucket-IAM emulation; unit-tested against an httptest fake instead) are documented, not e2e-gated) |
+| `mysql` | mariadb (MariaDB 10.11; the driver's integration test covers MariaDB 10.11 and 11.4 and MySQL 8.0 and 8.4 in a separate CI job, `test/integration/mysql.sh`) |
 
 Adding an implementation later (e.g. AWS S3 once the project has
 credentials and a budget) requires no example or harness changes,
@@ -1182,14 +1232,14 @@ and the corresponding GHA secret.
 
 ## Non-goals in v1alpha1
 
-- MySQL driver.
 - Per-consumer credential scoping (SASL/SCRAM for kafka, IAM
   users for S3). All `BucketyAccess` instances for the same
   `Buckety` receive identical credentials. Partial exception
   since gcs driver 0.2: opt-in per-BUCKET service accounts give
   each access its own key for a bucket-scoped identity (see
   Secret output > gcs driver), but role scoping remains
-  unimplemented.
+  unimplemented. The mysql driver is the exception: a user per
+  access, scoped by role (see Secret output > mysql driver).
 - Cross-namespace `bucketyRef`.
 - Quota enforcement.
 - Hot-reload of `buckety-controller.yaml` (envsubst is
