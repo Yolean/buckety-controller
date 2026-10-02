@@ -429,6 +429,63 @@ func TestGrantAppliesChangedPassword(t *testing.T) {
 	}
 }
 
+// A user created in this pass holds nothing: no REVOKE, which
+// MySQL 8.4 refuses for privileges that are not held.
+func TestGrantFirstMintReaderRevokesNothing(t *testing.T) {
+	fc := &fakeConn{}
+	if _, err := testDriver(fc).GrantAccess(context.Background(), grantReq("Reader", nil)); err != nil {
+		t.Fatal(err)
+	}
+	q := fc.queries()
+	if len(q) != 2 || q[0] != createUserSQL || !strings.HasPrefix(q[1], "GRANT SELECT ON ") {
+		t.Fatalf("statements: %q", q)
+	}
+}
+
+// A re-keyed user's grants are unknown: the rest of the managed set
+// is revoked one privilege at a time, and "no such grant" is the
+// expected answer for each privilege it does not hold.
+func TestGrantRekeyedReaderRevokesEachPrivilege(t *testing.T) {
+	fc := &fakeConn{}
+	fc.onExec = func(q string, _ []any) error {
+		switch {
+		case q == createUserSQL:
+			return &gomysql.MySQLError{Number: erCannotUser}
+		case strings.HasPrefix(q, "REVOKE INSERT "):
+			return nil
+		case strings.HasPrefix(q, "REVOKE "):
+			return &gomysql.MySQLError{Number: erNoSuchGrant}
+		}
+		return nil
+	}
+	// No password in the Secret: deleting it rotates the password.
+	if _, err := testDriver(fc).GrantAccess(context.Background(), grantReq("Reader", nil)); err != nil {
+		t.Fatal(err)
+	}
+	var revokes []string
+	for _, q := range fc.queries() {
+		if strings.HasPrefix(q, "REVOKE ") {
+			revokes = append(revokes, q)
+		}
+	}
+	if len(revokes) != len(readWritePrivileges)-1 {
+		t.Fatalf("want one REVOKE per non-Reader privilege, got %q", revokes)
+	}
+
+	fc.onExec = func(q string, _ []any) error {
+		switch {
+		case q == createUserSQL:
+			return &gomysql.MySQLError{Number: erCannotUser}
+		case strings.HasPrefix(q, "REVOKE "):
+			return &gomysql.MySQLError{Number: 1227}
+		}
+		return nil
+	}
+	if _, err := testDriver(fc).GrantAccess(context.Background(), grantReq("Reader", nil)); err == nil {
+		t.Fatal("a REVOKE refused for another reason was swallowed")
+	}
+}
+
 func TestGrantVerificationFailure(t *testing.T) {
 	orig := verifyBackoff
 	verifyBackoff = 0

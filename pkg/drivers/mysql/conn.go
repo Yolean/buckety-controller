@@ -14,6 +14,7 @@ import (
 const (
 	erAccessDenied = 1045 // login refused: unknown user or wrong password
 	erCannotUser   = 1396 // CREATE USER of an existing account, and similar
+	erNoSuchGrant  = 1141 // REVOKE of a privilege the account does not hold (MySQL 8.4)
 )
 
 var (

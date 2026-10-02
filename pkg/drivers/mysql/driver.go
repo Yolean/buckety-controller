@@ -236,7 +236,13 @@ func (d *Driver) ensureAccount(ctx context.Context, acct account, password strin
 	if created, err = d.setPassword(ctx, acct, password); err != nil {
 		return false, err
 	}
-	if err := d.alignGrants(ctx, acct, pattern, want, nil); err != nil {
+	// A user this pass created holds nothing yet; a re-keyed one
+	// holds what it held, which no login has read.
+	var have *grants
+	if created {
+		have = &grants{}
+	}
+	if err := d.alignGrants(ctx, acct, pattern, want, have); err != nil {
 		return created, err
 	}
 	if !fromSecret {
@@ -283,30 +289,21 @@ func (d *Driver) setPassword(ctx context.Context, acct account, password string)
 
 // alignGrants grants what is missing from want and revokes what is
 // beyond it, including GRANT OPTION. have is nil when the current
-// grants are unknown (the user was just created or re-keyed): then
-// the whole set is granted and the rest of the managed set revoked,
-// and a later pass with a working login revokes anything else.
+// grants are unknown (the user was re-keyed): then the whole set is
+// granted and the rest of the managed set revoked one privilege at
+// a time, and a later pass with a working login revokes anything
+// else.
 func (d *Driver) alignGrants(ctx context.Context, acct account, pattern string, want []string, have *grants) error {
-	var missing, extra []string
-	grantOption := false
 	if have == nil {
-		missing = want
-		extra = without(readWritePrivileges, want)
-	} else {
-		missing = without(want, have.privileges)
-		extra = without(have.privileges, want)
-		grantOption = have.grantOption
-	}
-	if len(missing) > 0 {
-		q, err := grantSQL(missing, pattern)
-		if err != nil {
+		if err := d.grant(ctx, acct, pattern, want); err != nil {
 			return err
 		}
-		if err := d.conn.exec(ctx, q, acct.User, acct.Host); err != nil {
-			return fmt.Errorf("mysql: grant %s to %s: %w", strings.Join(missing, ", "), acct, err)
-		}
+		return d.revokeIfHeld(ctx, acct, pattern, without(readWritePrivileges, want))
 	}
-	if len(extra) > 0 {
+	if err := d.grant(ctx, acct, pattern, without(want, have.privileges)); err != nil {
+		return err
+	}
+	if extra := without(have.privileges, want); len(extra) > 0 {
 		q, err := revokeSQL(extra, pattern)
 		if err != nil {
 			return err
@@ -315,9 +312,40 @@ func (d *Driver) alignGrants(ctx context.Context, acct account, pattern string, 
 			return fmt.Errorf("mysql: revoke %s from %s: %w", strings.Join(extra, ", "), acct, err)
 		}
 	}
-	if grantOption {
+	if have.grantOption {
 		if err := d.conn.exec(ctx, revokeGrantOptionSQL(pattern), acct.User, acct.Host); err != nil {
 			return fmt.Errorf("mysql: revoke GRANT OPTION from %s: %w", acct, err)
+		}
+	}
+	return nil
+}
+
+func (d *Driver) grant(ctx context.Context, acct account, pattern string, privileges []string) error {
+	if len(privileges) == 0 {
+		return nil
+	}
+	q, err := grantSQL(privileges, pattern)
+	if err != nil {
+		return err
+	}
+	if err := d.conn.exec(ctx, q, acct.User, acct.Host); err != nil {
+		return fmt.Errorf("mysql: grant %s to %s: %w", strings.Join(privileges, ", "), acct, err)
+	}
+	return nil
+}
+
+// revokeIfHeld revokes privileges that the account may or may not
+// hold. One statement each: MySQL 8.4 refuses to revoke a privilege
+// that is not held, and a REVOKE of several is atomic, so a single
+// statement would also keep the ones that are.
+func (d *Driver) revokeIfHeld(ctx context.Context, acct account, pattern string, privileges []string) error {
+	for _, p := range privileges {
+		q, err := revokeSQL([]string{p}, pattern)
+		if err != nil {
+			return err
+		}
+		if err := d.conn.exec(ctx, q, acct.User, acct.Host); err != nil && !isMySQLError(err, erNoSuchGrant) {
+			return fmt.Errorf("mysql: revoke %s from %s: %w", p, acct, err)
 		}
 	}
 	return nil
