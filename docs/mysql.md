@@ -104,7 +104,9 @@ restrict `adoption: Adopt`) with an admission policy.
 Kubernetes names contain no `_`, so the first form has one
 underscore after the prefix and the second two: the forms cannot
 collide, and two accesses share a user only through an 80-bit hash
-collision. The limit is 32 characters: MariaDB allows 80, MySQL 8
+collision. Names are unique within one cluster, not across
+clusters: run one controller per server and `namePrefix`, or give
+each cluster's backend a prefix of its own. The limit is 32 characters: MariaDB allows 80, MySQL 8
 only 32, and one scheme for both keeps a backend portable between
 them.
 
@@ -120,7 +122,7 @@ Privileges are granted on the one database, by its escaped name
 | --- | --- |
 | `Reader` | `SELECT` |
 | `ReadWrite` (default) | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES` |
-| `Writer` | refused: `Ready=False`, reason `GrantFailed`, no Secret |
+| `Writer` | refused: `Ready=False`, reason `GrantFailed`, no Secret; an access changed to `Writer` loses its user |
 
 ReadWrite includes the DDL that schema migrations need (an
 application that migrates its own schema on startup, as Keycloak
@@ -164,7 +166,10 @@ logging in as it with the Secret's password:
   per access per re-check and no statements that replicate.
 - login is refused: the user is missing or its password differs.
   `CREATE USER`, or `ALTER USER` when it exists, then grant, then
-  log in again (retrying for a few seconds, for Galera) to verify.
+  log in again (retrying for about four seconds, for Galera) to
+  verify. A password the driver has just generated is not verified
+  in the same pass: it must reach the Secret first, and the next
+  re-check logs in with it.
 
 So **`userHost` must admit the controller's own address**; with
 the default `%` it does. Changing `userHost` moves each access to
@@ -255,17 +260,27 @@ RSA key unauthenticated before sending the password; configure
    Order Isolation, which briefly blocks the whole cluster, so the
    driver writes only on change. A login check right after a change
    may reach a node that has not applied it yet; verification
-   retries for about five seconds.
+   retries for about four seconds.
 
 ## Known limitations
 
 - `DROP USER` and `ALTER USER` do not end open sessions; revoking
-  an access stops new logins, not running ones. Ending sessions
-  would need `CONNECTION ADMIN`/`SUPER`.
+  an access stops new logins, not running ones. Database-level
+  grant changes, such as a role change from ReadWrite to Reader,
+  reach an open session only when it next selects the database,
+  usually on reconnect. Ending sessions would need
+  `CONNECTION ADMIN`/`SUPER`.
+- `DROP DATABASE` waits for open transactions on the database. The
+  controller's sessions set `lock_wait_timeout` to 50 seconds, so a
+  blocked drop fails and is retried rather than queueing behind
+  long-lived consumer sessions.
 - A user created in a pass whose Secret write then fails is
-  dropped again; a controller crash between `CREATE USER` and the
-  status write can still leave a user that no `BucketyAccess`
-  records. Such users are found by the prefix.
+  dropped again. A user can still end up recorded by no
+  `BucketyAccess`: a controller crash between `CREATE USER` and the
+  status write, a failed status write, or a failed drop of a
+  replaced principal followed by the access's deletion. Such users
+  are found by the prefix. An access later created with the same
+  namespace and name takes the user over with its own password.
 - Grants the driver cannot see are not managed: table- and
   column-level grants, grants that reach the database through a
   wildcard pattern (`b\_%`, `b_t1%`), global privileges and roles.
@@ -273,5 +288,6 @@ RSA key unauthenticated before sending the password; configure
   exact database name.
 - An account with the same user name and a more specific host
   (created by hand) shadows the managed one: the driver cannot
-  inspect the managed account through it and re-asserts it on every
-  reconcile.
+  inspect the managed account through it, so every reconcile sets
+  its password and grants again, which on Galera means replicated
+  account statements on every re-check. Drop the shadowing account.
