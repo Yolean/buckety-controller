@@ -118,6 +118,34 @@ type EnsureRequest struct {
 	// merged under spec.parameters, declared templated keys
 	// resolved).
 	Parameters map[string]string
+	// Namespace and BucketyName identify the Buckety this request
+	// reconciles. Drivers use them only to label what they report
+	// (metrics); the backend resource is always Name.
+	Namespace   string
+	BucketyName string
+	// OnChange, when non-nil, is called once per in-place
+	// modification EnsureBuckety made to a backend resource that
+	// already existed, after the backend acknowledged it. It is not
+	// called when the resource is created, nor for a value that
+	// already matched. The reconciler turns each call into an Event
+	// and a log line, so changes the spec licenses (kadm partition
+	// increases, topic config alters) stay visible even though they
+	// need no human decision.
+	OnChange func(Change)
+}
+
+// Change describes one in-place modification reported through
+// EnsureRequest.OnChange.
+type Change struct {
+	// Reason is a CamelCase Event reason from a small fixed set per
+	// driver (kadm: PartitionsAdded, TopicConfigChanged).
+	Reason string
+	// Parameter is the spec.parameters key whose value was applied
+	// (partitions, config.retention.ms, ...).
+	Parameter string
+	// Old is the backend's value before the change, "" when the
+	// backend reported none. New is the value now applied.
+	Old, New string
 }
 
 // DeleteRequest carries what DeleteBuckety needs to tear down the

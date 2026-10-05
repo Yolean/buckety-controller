@@ -259,8 +259,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Reconcile the backend resource itself.
 	status.Set(&bky.Status.Conditions, "Reconciling", metav1.ConditionTrue, "Ensuring", "calling driver.EnsureBuckety", bky.Generation)
 	if err := backend.Driver.EnsureBuckety(ctx, registry.EnsureRequest{
-		Name:       bky.Status.BackendResourceName,
-		Parameters: effective,
+		Name:        bky.Status.BackendResourceName,
+		Parameters:  effective,
+		Namespace:   bky.Namespace,
+		BucketyName: bky.Name,
+		OnChange: func(c registry.Change) {
+			r.reportChange(ctx, &bky, c)
+		},
 	}); err != nil {
 		if registry.IsParameterDrift(err) {
 			status.Event(r.Recorder, &bky, baseBky.Status.Conditions, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable",
@@ -527,6 +532,32 @@ func (r *Reconciler) reconcileImplicitAccess(ctx context.Context, bky *bucketyv1
 		}
 	}
 	return nil
+}
+
+// reportChange logs and records as an Event one in-place change a
+// driver made to the backend resource (registry.EnsureRequest
+// OnChange). Every call is a change the backend acknowledged, so
+// unlike condition events these are not gated on a transition: an
+// alter that repeats on every recheck (a broker normalising a value
+// differently from the spec) shows up as a repeating Event, which
+// is the point.
+func (r *Reconciler) reportChange(ctx context.Context, bky *bucketyv1.Buckety, c registry.Change) {
+	old := c.Old
+	if old == "" {
+		old = "(unset)"
+	}
+	log.FromContext(ctx).Info("backend resource changed in place",
+		"buckety", types.NamespacedName{Namespace: bky.Namespace, Name: bky.Name},
+		"backend", bky.Spec.Backend,
+		"backendResource", bky.Status.BackendResourceName,
+		"reason", c.Reason,
+		"parameter", c.Parameter,
+		"old", c.Old,
+		"new", c.New)
+	if r.Recorder != nil {
+		r.Recorder.Event(bky, corev1.EventTypeNormal, c.Reason,
+			fmt.Sprintf("%s: %s -> %s on %q", c.Parameter, old, c.New, bky.Status.BackendResourceName))
+	}
 }
 
 func (r *Reconciler) surfaceBackendUnavailable(ctx context.Context, bky, base *bucketyv1.Buckety, reason, msg string) (ctrl.Result, error) {
