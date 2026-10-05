@@ -376,6 +376,14 @@ func (d *Driver) createTopic(ctx context.Context, name string, parts int32, rf i
 // increases and config alters on adopted topics are observable.
 func (d *Driver) alignTopic(ctx context.Context, req registry.EnsureRequest, existing *topicView, wantParts int32, wantRF int16, wantCfgs map[string]*string) error {
 	name := req.Name
+	// Export the counters at 0 for every topic and managed key this
+	// driver aligns, so that rate()/increase() see a later change as
+	// an increase. A series born at its first increment has no
+	// earlier sample, and increase() reads that change as nothing.
+	partitionsAdded.WithLabelValues(req.Namespace, req.BucketyName, name)
+	for k := range wantCfgs {
+		configChanges.WithLabelValues(req.Namespace, req.BucketyName, name, k)
+	}
 	if wantParts > 0 && existing.partitions != wantParts {
 		if wantParts < existing.partitions {
 			return &registry.ErrParameterDrift{

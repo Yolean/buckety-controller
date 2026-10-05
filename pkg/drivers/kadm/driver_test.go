@@ -13,6 +13,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
@@ -353,5 +354,35 @@ func TestAlignTopicCountsOnlyAcknowledgedChanges(t *testing.T) {
 	}
 	if got := counterValue(t, retention); got != 0 {
 		t.Errorf("retention.ms changes = %v, want 0", got)
+	}
+}
+
+// An in-shape topic still exports its counters, at 0, so a change
+// on a later reconcile reads as an increase.
+func TestAlignTopicExportsZeroSeries(t *testing.T) {
+	const ns, topic = "align-zero", "align-zero.orders"
+	if _, err := alignCase(t, &fakeMutator{}, ns, topic,
+		&topicView{partitions: 3, rf: 3, configs: map[string]string{"retention.ms": "1"}}, 3, 3,
+		map[string]*string{"retention.ms": strp("1")}); err != nil {
+		t.Fatal(err)
+	}
+	families, err := crmetrics.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]float64{}
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "namespace" && l.GetValue() == ns {
+					seen[f.GetName()] = m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	for _, name := range []string{"buckety_kadm_partitions_added_total", "buckety_kadm_config_changes_total"} {
+		if v, ok := seen[name]; !ok || v != 0 {
+			t.Errorf("%s for %s: value %v present %v, want 0 present", name, ns, v, ok)
+		}
 	}
 }
