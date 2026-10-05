@@ -213,6 +213,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err := r.Status().Update(ctx, &bky); err != nil {
 			return ctrl.Result{}, err
 		}
+		// After the update, so a retried conflict does not log twice.
+		// With reportChange's line, the log records every backend
+		// resource the controller takes on or changes; Events expire.
+		log.Info("backend resource claimed",
+			"backend", backend.Name,
+			"backendResource", resolved,
+			"provenance", provenance,
+			"exists", inspection.Exists,
+			"empty", inspection.Empty)
 	}
 
 	// Drift on driver major after stickiness. Stampedness is

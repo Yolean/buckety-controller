@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -224,5 +226,66 @@ func TestParameterDriftGauge(t *testing.T) {
 	}
 	if _, ok := driftSeries(t, ns, "gone"); ok {
 		t.Error("drift series survived a NotFound reconcile")
+	}
+}
+
+// inspectingDriver answers InspectBuckety with a fixed inspection.
+type inspectingDriver struct {
+	provisioningDriver
+	inspection registry.Inspection
+}
+
+func (d *inspectingDriver) InspectBuckety(context.Context, string) (registry.Inspection, error) {
+	return d.inspection, nil
+}
+
+// capturedLogs returns a context whose logger appends each info line,
+// message and key-values, to the returned slice.
+func capturedLogs() (context.Context, *[]string) {
+	var lines []string
+	l := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
+	return logr.NewContext(context.Background(), l), &lines
+}
+
+// First reconcile logs which backend resource the Buckety claimed
+// and how, once; later reconciles that change nothing log nothing.
+func TestClaimIsLoggedOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		inspection registry.Inspection
+		adoption   bucketyv1.AdoptionPolicy
+		want       string
+	}{
+		{"created", registry.Inspection{}, "", `"provenance"="Created" "exists"=false "empty"=false`},
+		{"adopted", registry.Inspection{Exists: true}, bucketyv1.AdoptionAdopt, `"provenance"="Adopted" "exists"=true "empty"=false`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bky := observedBuckety("claim-"+tc.name, "orders")
+			bky.Status = bucketyv1.BucketyStatus{}
+			bky.Spec.Adoption = tc.adoption
+			r, _, _ := newObservabilityReconciler(t, &inspectingDriver{inspection: tc.inspection}, bky)
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: bky.Namespace, Name: "orders"}}
+			ctx, lines := capturedLogs()
+			for range 2 {
+				if _, err := r.Reconcile(ctx, req); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var claims []string
+			for _, l := range *lines {
+				if strings.Contains(l, `"msg"="backend resource claimed"`) {
+					claims = append(claims, l)
+				}
+			}
+			if len(claims) != 1 {
+				t.Fatalf("claim log lines = %d, want 1: %q", len(claims), *lines)
+			}
+			if !strings.Contains(claims[0], tc.want) || !strings.Contains(claims[0], `"backend"="be"`) {
+				t.Errorf("claim log = %s, want it to contain %s", claims[0], tc.want)
+			}
+			if len(*lines) != 1 {
+				t.Errorf("info lines = %q, want only the claim", *lines)
+			}
+		})
 	}
 }
