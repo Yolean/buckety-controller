@@ -468,6 +468,84 @@ transition, so `kubectl describe buckety/<name>` (or
 `bucketyaccess/<name>`) shows the history even after a condition
 clears.
 
+### Metrics
+
+The controller serves Prometheus metrics on `--metrics-addr`
+(default `:8080`, container port `metrics`): controller-runtime's
+standard workqueue and reconcile metrics, plus these. Labels name
+resources, never parameter values, so there is one series per
+`Buckety` (per config key for the config counter).
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `buckety_parameter_drift` | gauge | `namespace`, `buckety`, `backend` | `1` while the `Buckety` has `ParameterDrift=True` (any driver), `0` otherwise; removed when the `Buckety` is deleted. |
+| `buckety_kadm_partitions_added_total` | counter | `namespace`, `buckety`, `topic` | Partitions the `kadm` driver added to an existing topic because `parameters.partitions` asked for more than the topic had. |
+| `buckety_kadm_config_changes_total` | counter | `namespace`, `buckety`, `topic`, `key` | Topic config keys (Kafka names, e.g. `retention.ms`) the `kadm` driver set on an existing topic because the broker's value differed from `config.<key>`. |
+
+The `kadm` driver reconciles partition increases and `config.*`
+differences in place, on every reconcile and periodic re-check;
+that matters most for topics claimed with `adoption: Adopt`, whose
+first reconcile can change a production topic. The counters move
+only after the broker accepted the change and never for values
+that already match, so any increase means the controller modified
+a topic. Each change is also an Event on the `Buckety`, reason
+`PartitionsAdded` or `TopicConfigChanged`, with the message
+`<parameter>: <old> -> <new> on "<topic>"`, and an info log line
+`backend resource changed in place` carrying `parameter`, `old` and
+`new`. A config counter that keeps rising for the same key means
+the broker reports the value differently from how the spec writes
+it, so every re-check sets it again; write the value in the
+broker's form.
+
+Suggested alerts. The counters exist at `0` from the first
+reconcile of a topic, so `increase()` catches later changes. The
+first reconcile of a newly adopted `Buckety` (or the
+first after a controller restart) can create a series and
+increment it at once, and `increase()` needs an earlier sample to
+see that; the `unless ... offset 1h` term covers series that are
+new within the window and already above zero.
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: buckety-controller
+spec:
+  groups:
+  - name: buckety-controller
+    rules:
+    - alert: BucketyKafkaPartitionsAdded
+      expr: |
+        increase(buckety_kadm_partitions_added_total[1h]) > 0
+        or
+        (buckety_kadm_partitions_added_total > 0 unless buckety_kadm_partitions_added_total offset 1h)
+      labels:
+        severity: info
+      annotations:
+        summary: buckety-controller added partitions to topic {{ $labels.topic }} ({{ $labels.namespace }}/{{ $labels.buckety }})
+    - alert: BucketyKafkaTopicConfigChanged
+      expr: |
+        increase(buckety_kadm_config_changes_total[1h]) > 0
+        or
+        (buckety_kadm_config_changes_total > 0 unless buckety_kadm_config_changes_total offset 1h)
+      labels:
+        severity: info
+      annotations:
+        summary: buckety-controller changed {{ $labels.key }} on topic {{ $labels.topic }} ({{ $labels.namespace }}/{{ $labels.buckety }})
+    - alert: BucketyParameterDrift
+      expr: buckety_parameter_drift == 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: Buckety {{ $labels.namespace }}/{{ $labels.buckety }} has ParameterDrift; see kubectl describe buckety
+```
+
+The counters are per controller process: they restart from zero
+with the Pod, and a deleted `Buckety`'s counter series stay until
+the next restart. The Events and the log line are the exact record
+of what changed and from what.
+
 ### Controller won't start
 
 Strict YAML decode catches typos:
