@@ -492,7 +492,11 @@ a topic. Each change is also an Event on the `Buckety`, reason
 `PartitionsAdded` or `TopicConfigChanged`, with the message
 `<parameter>: <old> -> <new> on "<topic>"`, and an info log line
 `backend resource changed in place` carrying `parameter`, `old` and
-`new`. A config counter that keeps rising for the same key means
+`new`. The first reconcile of every `Buckety` logs
+`backend resource claimed` once, with `provenance` (`Created` or
+`Adopted`), `exists` and `empty` from the adoption inspection. A
+reconcile that changes nothing logs nothing, so these two lines
+are the record of what the controller took on and changed. A config counter that keeps rising for the same key means
 the broker reports the value differently from how the spec writes
 it, so every re-check sets it again; write the value in the
 broker's form.

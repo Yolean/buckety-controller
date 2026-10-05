@@ -950,7 +950,9 @@ into `status.provenance` together with the other sticky fields:
   it.
 
 Resources stamped by controllers predating provenance carry no
-value and keep the old behavior end to end.
+value and keep the old behavior end to end. Once the stamp is
+persisted the controller logs `backend resource claimed` at info
+level with the provenance and the inspection result.
 
 **The gate.** `spec.adoption` controls what first reconcile does
 when the resource already exists:
