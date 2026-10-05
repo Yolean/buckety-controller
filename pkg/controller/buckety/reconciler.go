@@ -103,10 +103,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var bky bucketyv1.Buckety
 	if err := r.Get(ctx, req.NamespacedName, &bky); err != nil {
 		if apierrors.IsNotFound(err) {
+			forgetDrift(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+	// The drift gauge mirrors whatever ParameterDrift condition this
+	// pass leaves on the Buckety, whichever branch returns.
+	defer recordDrift(&bky)
 
 	// Resolve the backend up front; nearly every branch needs it.
 	// The driver behind a backend name is part of the sticky

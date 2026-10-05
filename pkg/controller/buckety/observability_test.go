@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -133,5 +135,94 @@ func TestDriverChangesBecomeEvents(t *testing.T) {
 		if strings.Contains(e, "PartitionsAdded") || strings.Contains(e, "TopicConfigChanged") {
 			t.Errorf("no-op reconcile recorded change event %q", e)
 		}
+	}
+}
+
+// driftSeries returns the drift gauge's value for ns/name, and
+// whether such a series exists at all.
+func driftSeries(t *testing.T, ns, name string) (float64, bool) {
+	t.Helper()
+	ch := make(chan prometheus.Metric, 64)
+	go func() { parameterDrift.Collect(ch); close(ch) }()
+	val, found := 0.0, false
+	for m := range ch {
+		var d dto.Metric
+		if err := m.Write(&d); err != nil {
+			t.Fatal(err)
+		}
+		labels := map[string]string{}
+		for _, l := range d.GetLabel() {
+			labels[l.GetName()] = l.GetValue()
+		}
+		if labels["namespace"] == ns && labels["buckety"] == name {
+			if labels["backend"] != "be" {
+				t.Errorf("drift series backend label = %q, want be", labels["backend"])
+			}
+			val, found = d.GetGauge().GetValue(), true
+		}
+	}
+	return val, found
+}
+
+// The drift gauge follows the ParameterDrift condition: 1 while the
+// driver answers ErrParameterDrift, 0 once Ensure succeeds again,
+// and gone with the Buckety.
+func TestParameterDriftGauge(t *testing.T) {
+	const ns = "drift-gauge"
+	ctx := context.Background()
+	drv := &changingDriver{drift: true}
+	r, cl, _ := newObservabilityReconciler(t, drv, observedBuckety(ns, "orders"))
+	key := types.NamespacedName{Namespace: ns, Name: "orders"}
+	req := reconcile.Request{NamespacedName: key}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := driftSeries(t, ns, "orders"); !ok || v != 1 {
+		t.Fatalf("drift gauge = %v (present %v), want 1", v, ok)
+	}
+	// Steady state while drifted.
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := driftSeries(t, ns, "orders"); v != 1 {
+		t.Fatalf("drift gauge on repeat = %v, want 1", v)
+	}
+
+	// Resolved (spec adjusted to match the backend).
+	drv.drift = false
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := driftSeries(t, ns, "orders"); !ok || v != 0 {
+		t.Fatalf("drift gauge after resolution = %v (present %v), want 0", v, ok)
+	}
+
+	// Drifted again, then deleted: the series goes with the Buckety.
+	drv.drift = true
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var bky bucketyv1.Buckety
+	if err := cl.Get(ctx, key, &bky); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Delete(ctx, &bky); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := driftSeries(t, ns, "orders"); ok {
+		t.Errorf("drift series still present after finalizer release: %v", v)
+	}
+	// A late NotFound pass for a Buckety this process never saw
+	// drop its finalizer also clears any series.
+	parameterDrift.WithLabelValues(ns, "gone", "be").Set(1)
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "gone"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := driftSeries(t, ns, "gone"); ok {
+		t.Error("drift series survived a NotFound reconcile")
 	}
 }
