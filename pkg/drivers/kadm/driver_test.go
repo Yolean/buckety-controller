@@ -1,10 +1,20 @@
 package kadm
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
+
+	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
 
 // Validation methods never touch the broker clients, so a zero
@@ -161,5 +171,187 @@ func TestParametersSchemaInSync(t *testing.T) {
 		if _, ok := s.Properties[tok]; !ok {
 			t.Errorf("ValidateParameters advertises %q but the schema does not list it", tok)
 		}
+	}
+}
+
+// fakeMutator records the broker mutations alignTopic issues and
+// answers with the configured errors.
+type fakeMutator struct {
+	updates   []int
+	alters    [][]kadm.AlterConfig
+	updateErr error // request-level
+	topicErr  error // per-topic, in the response
+	alterErr  error // per-resource, in the response
+}
+
+func (f *fakeMutator) UpdatePartitions(_ context.Context, set int, topics ...string) (kadm.CreatePartitionsResponses, error) {
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	f.updates = append(f.updates, set)
+	rs := kadm.CreatePartitionsResponses{}
+	for _, t := range topics {
+		rs[t] = kadm.CreatePartitionsResponse{Topic: t, Err: f.topicErr}
+	}
+	return rs, nil
+}
+
+func (f *fakeMutator) AlterTopicConfigs(_ context.Context, cfgs []kadm.AlterConfig, topics ...string) (kadm.AlterConfigsResponses, error) {
+	f.alters = append(f.alters, cfgs)
+	var rs kadm.AlterConfigsResponses
+	for _, t := range topics {
+		rs = append(rs, kadm.AlterConfigsResponse{Name: t, Err: f.alterErr})
+	}
+	return rs, nil
+}
+
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+func strp(s string) *string { return &s }
+
+// alignCase runs alignTopic for Buckety ns/orders on topic and
+// returns the changes it reported.
+func alignCase(t *testing.T, m *fakeMutator, ns, topic string, existing *topicView, wantParts int32, wantRF int16, wantCfgs map[string]*string) ([]registry.Change, error) {
+	t.Helper()
+	var got []registry.Change
+	drv := &Driver{mutator: m}
+	err := drv.alignTopic(context.Background(), registry.EnsureRequest{
+		Name: topic, Namespace: ns, BucketyName: "orders",
+		OnChange: func(c registry.Change) { got = append(got, c) },
+	}, existing, wantParts, wantRF, wantCfgs)
+	return got, err
+}
+
+// Partition increases and config alters move the counters by what
+// was actually changed and report one Change each; a topic already
+// in shape moves nothing and reports nothing.
+func TestAlignTopicCountsChanges(t *testing.T) {
+	const ns, topic = "align-counts", "align-counts.orders"
+	parts := partitionsAdded.WithLabelValues(ns, "orders", topic)
+	retention := configChanges.WithLabelValues(ns, "orders", topic, "retention.ms")
+	cleanup := configChanges.WithLabelValues(ns, "orders", topic, "cleanup.policy")
+	segment := configChanges.WithLabelValues(ns, "orders", topic, "segment.bytes")
+
+	m := &fakeMutator{}
+	existing := &topicView{partitions: 3, rf: 3, configs: map[string]string{
+		"retention.ms":   "604800000",
+		"cleanup.policy": "delete",
+		"segment.bytes":  "1073741824",
+	}}
+	changes, err := alignCase(t, m, ns, topic, existing, 6, 3, map[string]*string{
+		"retention.ms":   strp("86400000"),
+		"cleanup.policy": strp("delete"), // equal: not altered, not counted
+		"segment.bytes":  strp("536870912"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.updates) != 1 || m.updates[0] != 6 {
+		t.Errorf("UpdatePartitions calls %v, want [6]", m.updates)
+	}
+	if got := counterValue(t, parts); got != 3 {
+		t.Errorf("partitions added = %v, want 3", got)
+	}
+	if got := counterValue(t, retention); got != 1 {
+		t.Errorf("retention.ms changes = %v, want 1", got)
+	}
+	if got := counterValue(t, segment); got != 1 {
+		t.Errorf("segment.bytes changes = %v, want 1", got)
+	}
+	if got := counterValue(t, cleanup); got != 0 {
+		t.Errorf("cleanup.policy (equal) changes = %v, want 0", got)
+	}
+	want := []registry.Change{
+		{Reason: ReasonPartitionsAdded, Parameter: "partitions", Old: "3", New: "6"},
+		{Reason: ReasonTopicConfigChanged, Parameter: "config.retention.ms", Old: "604800000", New: "86400000"},
+		{Reason: ReasonTopicConfigChanged, Parameter: "config.segment.bytes", Old: "1073741824", New: "536870912"},
+	}
+	if fmt.Sprint(changes) != fmt.Sprint(want) {
+		t.Errorf("changes\n got %v\nwant %v", changes, want)
+	}
+
+	// Next reconcile sees the topic in shape: no calls, no counts.
+	inShape := &topicView{partitions: 6, rf: 3, configs: map[string]string{
+		"retention.ms":   "86400000",
+		"cleanup.policy": "delete",
+		"segment.bytes":  "536870912",
+	}}
+	changes, err = alignCase(t, m, ns, topic, inShape, 6, 3, map[string]*string{
+		"retention.ms":   strp("86400000"),
+		"cleanup.policy": strp("delete"),
+		"segment.bytes":  strp("536870912"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 0 || len(m.updates) != 1 || len(m.alters) != 1 {
+		t.Errorf("no-op align: changes=%v updates=%v alters=%d", changes, m.updates, len(m.alters))
+	}
+	if counterValue(t, parts) != 3 || counterValue(t, retention) != 1 || counterValue(t, segment) != 1 {
+		t.Error("no-op align moved a counter")
+	}
+
+	// A key the broker does not report counts as a change from unset.
+	changes, err = alignCase(t, m, ns, topic, &topicView{partitions: 6, rf: 3, configs: map[string]string{}}, 0, 0,
+		map[string]*string{"cleanup.policy": strp("compact")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := counterValue(t, cleanup); got != 1 {
+		t.Errorf("cleanup.policy changes = %v, want 1", got)
+	}
+	if len(changes) != 1 || changes[0].Old != "" || changes[0].New != "compact" {
+		t.Errorf("changes %v, want one from unset to compact", changes)
+	}
+}
+
+// Nothing is counted or reported unless the broker accepted the
+// change, and a shrink request stays ParameterDrift.
+func TestAlignTopicCountsOnlyAcknowledgedChanges(t *testing.T) {
+	const ns, topic = "align-failures", "align-failures.orders"
+	parts := partitionsAdded.WithLabelValues(ns, "orders", topic)
+	retention := configChanges.WithLabelValues(ns, "orders", topic, "retention.ms")
+	existing := &topicView{partitions: 3, rf: 3, configs: map[string]string{"retention.ms": "1"}}
+	want := map[string]*string{"retention.ms": strp("2")}
+
+	cases := []struct {
+		name    string
+		m       *fakeMutator
+		parts   int32
+		cfgs    map[string]*string
+		wantErr string
+	}{
+		{"request fails", &fakeMutator{updateErr: errors.New("broker down")}, 6, nil, "update partitions"},
+		{"topic rejected", &fakeMutator{topicErr: kerr.PolicyViolation}, 6, nil, ""},
+		{"alter rejected", &fakeMutator{alterErr: kerr.InvalidConfig}, 0, want, "alter configs"},
+		{"shrink", &fakeMutator{}, 2, want, "cannot shrink"},
+	}
+	for _, c := range cases {
+		changes, err := alignCase(t, c.m, ns, topic, existing, c.parts, 3, c.cfgs)
+		if c.wantErr == "" && err != nil {
+			t.Errorf("%s: %v", c.name, err)
+		}
+		if c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)) {
+			t.Errorf("%s: err %v, want %q", c.name, err, c.wantErr)
+		}
+		if len(changes) != 0 {
+			t.Errorf("%s: reported %v", c.name, changes)
+		}
+	}
+	if _, err := alignCase(t, &fakeMutator{}, ns, topic, existing, 2, 3, nil); !registry.IsParameterDrift(err) {
+		t.Errorf("shrink: %v, want ParameterDrift", err)
+	}
+	if got := counterValue(t, parts); got != 0 {
+		t.Errorf("partitions added = %v, want 0", got)
+	}
+	if got := counterValue(t, retention); got != 0 {
+		t.Errorf("retention.ms changes = %v, want 0", got)
 	}
 }
