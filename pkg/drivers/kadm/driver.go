@@ -13,10 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
+	"github.com/go-logr/logr"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -53,10 +55,12 @@ func factory(raw json.RawMessage) (registry.Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kadm: build kgo client: %w", err)
 	}
+	ac := kadm.NewClient(kc)
 	return &Driver{
 		cfg:     cfg,
 		kclient: kc,
-		aclient: kadm.NewClient(kc),
+		aclient: ac,
+		mutator: ac,
 	}, nil
 }
 
@@ -65,6 +69,16 @@ type Driver struct {
 	cfg     *Config
 	kclient *kgo.Client
 	aclient *kadm.Client
+	// mutator is aclient, narrowed to the calls alignTopic changes
+	// an existing topic with, so unit tests can observe them
+	// without a broker.
+	mutator topicMutator
+}
+
+// topicMutator is the subset of *kadm.Client that alignTopic uses.
+type topicMutator interface {
+	UpdatePartitions(ctx context.Context, set int, topics ...string) (kadm.CreatePartitionsResponses, error)
+	AlterTopicConfigs(ctx context.Context, configs []kadm.AlterConfig, topics ...string) (kadm.AlterConfigsResponses, error)
 }
 
 func (d *Driver) Name() string    { return DriverName }
@@ -127,7 +141,7 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 	if existing == nil {
 		return d.createTopic(ctx, req.Name, wantParts, wantRF, wantCfgs)
 	}
-	return d.alignTopic(ctx, req.Name, existing, wantParts, wantRF, wantCfgs)
+	return d.alignTopic(ctx, req, existing, wantParts, wantRF, wantCfgs)
 }
 
 // DeleteBuckety removes the topic. Idempotent on NotFound.
@@ -356,7 +370,20 @@ func (d *Driver) createTopic(ctx context.Context, name string, parts int32, rf i
 	return nil
 }
 
-func (d *Driver) alignTopic(ctx context.Context, name string, existing *topicView, wantParts int32, wantRF int16, wantCfgs map[string]*string) error {
+// alignTopic brings an existing topic to the requested shape. Every
+// change it makes is counted (metrics.go) and reported through
+// req.OnChange once the broker has acknowledged it, so partition
+// increases and config alters on adopted topics are observable.
+func (d *Driver) alignTopic(ctx context.Context, req registry.EnsureRequest, existing *topicView, wantParts int32, wantRF int16, wantCfgs map[string]*string) error {
+	name := req.Name
+	// Export the counters at 0 for every topic and managed key this
+	// driver aligns, so that rate()/increase() see a later change as
+	// an increase. A series born at its first increment has no
+	// earlier sample, and increase() reads that change as nothing.
+	partitionsAdded.WithLabelValues(req.Namespace, req.BucketyName, name)
+	for k := range wantCfgs {
+		configChanges.WithLabelValues(req.Namespace, req.BucketyName, name, k)
+	}
 	if wantParts > 0 && existing.partitions != wantParts {
 		if wantParts < existing.partitions {
 			return &registry.ErrParameterDrift{
@@ -364,8 +391,25 @@ func (d *Driver) alignTopic(ctx context.Context, name string, existing *topicVie
 			}
 		}
 		// Add partitions to reach the requested count.
-		if _, err := d.aclient.UpdatePartitions(ctx, int(wantParts), name); err != nil {
+		resp, err := d.mutator.UpdatePartitions(ctx, int(wantParts), name)
+		if err != nil {
 			return fmt.Errorf("kadm: update partitions %q: %w", name, err)
+		}
+		// kadm reports per-topic rejections (authorization, broker
+		// policy) in resp, not err. This loop has always carried on
+		// regardless; it still does, but a rejected increase is not
+		// a change, so it is logged instead of counted.
+		if r, ok := resp[name]; ok && r.Err != nil {
+			logr.FromContextOrDiscard(ctx).Error(r.Err, "kadm: partition increase rejected by broker",
+				"topic", name, "current", existing.partitions, "requested", wantParts, "brokerMessage", r.ErrMessage)
+		} else {
+			partitionsAdded.WithLabelValues(req.Namespace, req.BucketyName, name).Add(float64(wantParts - existing.partitions))
+			report(req, registry.Change{
+				Reason:    ReasonPartitionsAdded,
+				Parameter: "partitions",
+				Old:       strconv.Itoa(int(existing.partitions)),
+				New:       strconv.Itoa(int(wantParts)),
+			})
 		}
 	}
 	if wantRF > 0 && existing.rf != 0 && existing.rf != wantRF {
@@ -386,7 +430,7 @@ func (d *Driver) alignTopic(ctx context.Context, name string, existing *topicVie
 		}
 	}
 	if len(alters) > 0 {
-		resp, err := d.aclient.AlterTopicConfigs(ctx, alters, name)
+		resp, err := d.mutator.AlterTopicConfigs(ctx, alters, name)
 		if err != nil {
 			return fmt.Errorf("kadm: alter configs %q: %w", name, err)
 		}
@@ -395,8 +439,27 @@ func (d *Driver) alignTopic(ctx context.Context, name string, existing *topicVie
 				return fmt.Errorf("kadm: alter configs %q: %w", name, r.Err)
 			}
 		}
+		// One incremental alter per topic: the broker applies all
+		// keys or none, so success means every key changed.
+		sort.Slice(alters, func(i, j int) bool { return alters[i].Name < alters[j].Name })
+		for _, a := range alters {
+			configChanges.WithLabelValues(req.Namespace, req.BucketyName, name, a.Name).Inc()
+			report(req, registry.Change{
+				Reason:    ReasonTopicConfigChanged,
+				Parameter: "config." + a.Name,
+				Old:       existing.configs[a.Name],
+				New:       *a.Value,
+			})
+		}
 	}
 	return nil
+}
+
+// report calls req.OnChange when the caller asked for changes.
+func report(req registry.EnsureRequest, c registry.Change) {
+	if req.OnChange != nil {
+		req.OnChange(c)
+	}
 }
 
 // translateParameters splits spec.parameters into (partitions,
