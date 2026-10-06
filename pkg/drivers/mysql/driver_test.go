@@ -365,10 +365,10 @@ func TestGrantRepairsGrants(t *testing.T) {
 			[]string{"GRANT INSERT ON `b\\_t1\\_orders`.* TO ?@?"}},
 		{"no grants at all", "Reader", &grants{},
 			[]string{"GRANT SELECT ON `b\\_t1\\_orders`.* TO ?@?"}},
-		{"extra privileges and grant option", "ReadWrite", &grants{privileges: append(slices.Clone(readWritePrivileges), "EXECUTE", "CREATE VIEW"), grantOption: true},
-			[]string{"REVOKE EXECUTE, CREATE VIEW ON `b\\_t1\\_orders`.* FROM ?@?", "REVOKE GRANT OPTION ON `b\\_t1\\_orders`.* FROM ?@?"}},
+		{"extra privileges and grant option", "ReadWrite", &grants{privileges: append(slices.Clone(readWritePrivileges), "EXECUTE", "TRIGGER"), grantOption: true},
+			[]string{"REVOKE EXECUTE, TRIGGER ON `b\\_t1\\_orders`.* FROM ?@?", "REVOKE GRANT OPTION ON `b\\_t1\\_orders`.* FROM ?@?"}},
 		{"role downgraded to Reader", "Reader", allRW(),
-			[]string{"REVOKE INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES ON `b\\_t1\\_orders`.* FROM ?@?"}},
+			[]string{"REVOKE INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES, CREATE VIEW, SHOW VIEW ON `b\\_t1\\_orders`.* FROM ?@?"}},
 	}
 	for _, c := range cases {
 		fc := &fakeConn{logins: []loginResult{{grants: c.have}}}
