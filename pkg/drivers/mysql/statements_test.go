@@ -14,6 +14,7 @@ func TestRolePrivileges(t *testing.T) {
 	wantRW := []string{
 		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX",
 		"DROP", "REFERENCES", "CREATE TEMPORARY TABLES", "LOCK TABLES",
+		"CREATE VIEW", "SHOW VIEW",
 	}
 	for _, role := range []string{"ReadWrite", ""} {
 		rw, err := rolePrivileges(role)
@@ -33,7 +34,7 @@ func TestGrantAndRevokeSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES ON `b\\_t1\\_orders`.* TO ?@?"
+	want := "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES, CREATE VIEW, SHOW VIEW ON `b\\_t1\\_orders`.* TO ?@?"
 	if q != want {
 		t.Errorf("grantSQL:\n got %s\nwant %s", q, want)
 	}

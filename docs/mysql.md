@@ -121,12 +121,14 @@ Privileges are granted on the one database, by its escaped name
 | `spec.role` | Privileges |
 | --- | --- |
 | `Reader` | `SELECT` |
-| `ReadWrite` (default) | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES` |
+| `ReadWrite` (default) | `SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES, CREATE VIEW, SHOW VIEW` |
 | `Writer` | refused: `Ready=False`, reason `GrantFailed`, no Secret; an access changed to `Writer` loses its user |
 
 ReadWrite includes the DDL that schema migrations need (an
 application that migrates its own schema on startup, as Keycloak
-does). Database-level `DROP` and `CREATE` also let a ReadWrite
+does), views among it: an application that creates views over its
+own tables needs `CREATE VIEW`, and `SHOW VIEW` to read their
+definitions back (and for a dump to include them). Database-level `DROP` and `CREATE` also let a ReadWrite
 user drop its own database, or recreate it; nothing beyond it.
 On every reconcile the driver grants what is missing and revokes
 everything else the user holds on the database by its exact
