@@ -19,7 +19,8 @@
 // CREATE/ALTER USER), and a successful one reads the user's own
 // grants, which the admin account cannot see without SELECT on the
 // mysql schema. A check that passed is remembered for a while
-// (verified.go).
+// (verified.go), and connection failures hold further attempts back
+// (breaker.go).
 package mysql
 
 import (
@@ -71,7 +72,7 @@ func newDriver(cfg *Config) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mysql config: %w", err)
 	}
-	return &Driver{cfg: cfg, conn: c, verifyInterval: cfg.accountCheckInterval}, nil
+	return &Driver{cfg: cfg, conn: newBreakerConn(c), verifyInterval: cfg.accountCheckInterval}, nil
 }
 
 // Driver implements registry.Driver for MariaDB/MySQL.

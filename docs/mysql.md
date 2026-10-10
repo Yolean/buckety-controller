@@ -181,6 +181,14 @@ granted more out of band is repaired within the interval. `0s`
 checks every access on every re-check. The database itself is
 checked on every re-check.
 
+After a connection failure (the server down, a broken network or
+TLS path; not a refused login or statement) the driver holds its
+operations back for 2 seconds, doubling per consecutive failure up
+to 5 minutes, and lets one through per cooldown. The servers block
+a client host after `max_connect_errors` (default 100) failed
+handshakes, until `FLUSH HOSTS`; without the cooldown, every access
+re-checked during an outage would count against it.
+
 So **`userHost` must admit the controller's own address**; with
 the default `%` it does. Changing `userHost` moves each access to
 a new account on its next reconcile, and the controller drops the
