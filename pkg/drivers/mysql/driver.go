@@ -18,7 +18,8 @@
 // missing or its password differs (both repaired by
 // CREATE/ALTER USER), and a successful one reads the user's own
 // grants, which the admin account cannot see without SELECT on the
-// mysql schema.
+// mysql schema. A check that passed is remembered for a while
+// (verified.go).
 package mysql
 
 import (
@@ -70,13 +71,27 @@ func newDriver(cfg *Config) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mysql config: %w", err)
 	}
-	return &Driver{cfg: cfg, conn: c}, nil
+	return &Driver{cfg: cfg, conn: c, verifyInterval: cfg.accountCheckInterval}, nil
 }
 
 // Driver implements registry.Driver for MariaDB/MySQL.
 type Driver struct {
 	cfg  *Config
 	conn conn
+	// verifyInterval is how long a passed login check stands while
+	// nothing about the access changes (config accountCheckInterval);
+	// zero checks on every pass.
+	verifyInterval time.Duration
+	verified       verifiedAccounts
+	// now is the clock for verifyInterval; nil means time.Now.
+	now func() time.Time
+}
+
+func (d *Driver) clock() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
 }
 
 func (d *Driver) Name() string    { return DriverName }
@@ -182,6 +197,7 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 		// it would leave a downgrade to Writer with ReadWrite's
 		// grants and a working Secret. Changing the role back
 		// recreates the user with the Secret's password.
+		d.verified.forget(acct)
 		if derr := d.conn.exec(ctx, dropUserSQL, acct.User, acct.Host); derr != nil {
 			return registry.GrantResult{}, fmt.Errorf("%w; dropping the user %s it may hold from an earlier role failed: %v", err, acct, derr)
 		}
@@ -198,7 +214,22 @@ func (d *Driver) GrantAccess(ctx context.Context, req registry.GrantRequest) (re
 		return registry.GrantResult{}, fmt.Errorf("mysql: the access Secret's password: %w", err)
 	}
 
-	created, err := d.ensureAccount(ctx, acct, password, fromSecret, grantPattern(db), want)
+	pattern := grantPattern(db)
+	key := verifyKey(acct, pattern, want, password)
+	if fromSecret && d.verified.fresh(acct, key, d.clock(), d.verifyInterval) {
+		return registry.GrantResult{
+			SecretData: d.secretData(db, user, password),
+			Principal:  acct.String(),
+			Scoped:     true,
+			Revocable:  true,
+		}, nil
+	}
+	created, verified, err := d.ensureAccount(ctx, acct, password, fromSecret, pattern, want)
+	if verified && err == nil {
+		d.verified.record(acct, key, d.clock())
+	} else {
+		d.verified.forget(acct)
+	}
 	if err != nil {
 		if created {
 			// Nothing records a user created in a failed pass: drop
@@ -227,23 +258,24 @@ const verifyAttempts = 5
 var verifyBackoff = time.Second
 
 // ensureAccount converges acct and reports whether it created the
-// user. fromSecret says the password is already stored in the
+// user, and whether a login with the password confirmed the result
+// (verified). fromSecret says the password is already stored in the
 // access Secret; only then is a failed verification an error,
 // because a generated password must reach the Secret first.
-func (d *Driver) ensureAccount(ctx context.Context, acct account, password string, fromSecret bool, pattern string, want []string) (created bool, err error) {
+func (d *Driver) ensureAccount(ctx context.Context, acct account, password string, fromSecret bool, pattern string, want []string) (created, verified bool, err error) {
 	if fromSecret {
 		have, err := d.conn.login(ctx, acct, password, pattern)
 		if err == nil {
-			return false, d.alignGrants(ctx, acct, pattern, want, have)
+			return false, true, d.alignGrants(ctx, acct, pattern, want, have)
 		}
 		if !errors.Is(err, errLoginDenied) && !errors.Is(err, errShadowed) {
-			return false, fmt.Errorf("mysql: log in as %s to check it: %w", acct, err)
+			return false, false, fmt.Errorf("mysql: log in as %s to check it: %w", acct, err)
 		}
 		// Missing user, a password that differs from the Secret, or
 		// an account for another userHost matched instead.
 	}
 	if created, err = d.setPassword(ctx, acct, password); err != nil {
-		return false, err
+		return false, false, err
 	}
 	// A user this pass created holds nothing yet; a re-keyed one
 	// holds what it held, which no login has read.
@@ -252,29 +284,29 @@ func (d *Driver) ensureAccount(ctx context.Context, acct account, password strin
 		have = &grants{}
 	}
 	if err := d.alignGrants(ctx, acct, pattern, want, have); err != nil {
-		return created, err
+		return created, false, err
 	}
 	if !fromSecret {
-		return created, nil
+		return created, false, nil
 	}
 	for attempt := 1; ; attempt++ {
 		have, err := d.conn.login(ctx, acct, password, pattern)
 		if err == nil {
-			return created, d.alignGrants(ctx, acct, pattern, want, have)
+			return created, true, d.alignGrants(ctx, acct, pattern, want, have)
 		}
 		if errors.Is(err, errShadowed) {
 			// The account for the previous userHost is more specific
 			// and still exists; the reconciler drops it once this
 			// grant's principal is recorded, and the next pass
 			// verifies.
-			return created, nil
+			return created, false, nil
 		}
 		if !errors.Is(err, errLoginDenied) || attempt == verifyAttempts {
-			return created, fmt.Errorf("mysql: set the password of %s from its Secret, but the controller cannot log in with it (userHost %q must admit the controller's address): %w", acct, d.cfg.UserHost, err)
+			return created, false, fmt.Errorf("mysql: set the password of %s from its Secret, but the controller cannot log in with it (userHost %q must admit the controller's address): %w", acct, d.cfg.UserHost, err)
 		}
 		select {
 		case <-ctx.Done():
-			return created, ctx.Err()
+			return created, false, ctx.Err()
 		case <-time.After(verifyBackoff):
 		}
 	}
@@ -385,6 +417,7 @@ func (d *Driver) RevokeAccess(ctx context.Context, principal string) error {
 	if err != nil {
 		return err
 	}
+	d.verified.forget(acct)
 	if err := d.conn.exec(ctx, dropUserSQL, acct.User, acct.Host); err != nil {
 		return fmt.Errorf("mysql: drop user %s: %w", acct, err)
 	}

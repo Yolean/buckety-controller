@@ -54,6 +54,12 @@
           "description": "Name to verify in the server certificate. Defaults to host."
         }
       }
+    },
+    "accountCheckInterval": {
+      "type": "string",
+      "pattern": "^(0|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$",
+      "default": "30m",
+      "description": "Go duration for which an access's passed account check (a login as its user, reading its grants) stands while the account, role, database and Secret password stay the same. Within it, steady-state passes skip the login: one new connection per access per interval instead of per re-check. A user dropped, re-keyed or granted more out of band is repaired within the interval. 0s checks every access on every pass."
     }
   }
 }

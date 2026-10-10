@@ -164,14 +164,22 @@ logging in as it with the Secret's password:
 
 - login succeeds: read the user's own rows in
   `information_schema.SCHEMA_PRIVILEGES` and align the grants. When
-  nothing differs, nothing is written: steady state costs one login
-  per access per re-check and no statements that replicate.
+  nothing differs, nothing is written and no statement replicates.
 - login is refused: the user is missing or its password differs.
   `CREATE USER`, or `ALTER USER` when it exists, then grant, then
   log in again (retrying for about four seconds, for Galera) to
   verify. A password the driver has just generated is not verified
   in the same pass: it must reach the Secret first, and the next
   re-check logs in with it.
+
+A check that passed stands for `accountCheckInterval` (backend
+config, default `30m`) while the access's account, role, database
+and Secret password stay the same, so steady state costs one login
+per access per interval rather than per re-check. Changes through
+the API are checked on the next pass; a user dropped, re-keyed or
+granted more out of band is repaired within the interval. `0s`
+checks every access on every re-check. The database itself is
+checked on every re-check.
 
 So **`userHost` must admit the controller's own address**; with
 the default `%` it does. Changing `userHost` moves each access to
