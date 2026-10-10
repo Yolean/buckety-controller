@@ -407,6 +407,22 @@ gcs_object_put() {
 
 # ---- controller lifecycle helpers ----
 
+# controller_rollout_wait
+# `rollout status` returns once the new Pod is available and the old
+# one is terminating, but the old one can still be the leader for a
+# moment and reconcile with the previous config or image. The
+# controller releases its lease when it stops, so its successor takes
+# over at once; wait until the old Pod is gone too, so a scenario
+# never meets the previous controller.
+controller_rollout_wait() {
+  kcg -n "$E2E_CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
+  local deadline=$(( $(date +%s) + 120 ))
+  while (( $(kcg -n "$E2E_CONTROLLER_NS" get pods -l app.kubernetes.io/name=buckety-controller -o name | wc -l) > 1 )); do
+    (( $(date +%s) < deadline )) || fail "an old buckety-controller Pod is still terminating after 120s"
+    sleep 1
+  done
+}
+
 # controller_config_apply <file>
 # Installs <file> as the controller config Secret and restarts the
 # controller - the operation a platform performs on a config
@@ -417,7 +433,7 @@ controller_config_apply() {
     --from-file=buckety-controller.yaml="$1" \
     --dry-run=client -o yaml | kcg apply -f -
   rollout_restart deploy/buckety-controller
-  kcg -n "$E2E_CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
+  controller_rollout_wait
 }
 
 controller_config_restore() {
@@ -429,7 +445,7 @@ controller_config_restore() {
 controller_set_image() {
   log "switching controller image to $1"
   kcg -n "$E2E_CONTROLLER_NS" set image deploy/buckety-controller "controller=$1"
-  kcg -n "$E2E_CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
+  controller_rollout_wait
 }
 
 # ---- shared scenario bodies ----
@@ -639,7 +655,7 @@ scaled_to_zero_scenario() {
   # controller.
   log "restoring buckety-controller to 1"
   kcg -n "$E2E_CONTROLLER_NS" scale deploy/buckety-controller --replicas=1
-  kcg -n "$E2E_CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=120s
+  controller_rollout_wait
 
   log "scaled-to-zero PASS"
 }
