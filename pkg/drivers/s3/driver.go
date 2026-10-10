@@ -157,11 +157,21 @@ func (d *Driver) InspectBuckety(ctx context.Context, name string) (registry.Insp
 	return registry.Inspection{Exists: true, Empty: len(vers.Versions) == 0}, nil
 }
 
-// EnsureBuckety creates the backend bucket. Idempotent on
-// BucketAlreadyOwnedByYou. BucketAlreadyExists is ambiguous: most
-// non-AWS implementations surface it for a caller-owned bucket,
-// but on AWS proper it can mean a global-namespace collision with
-// a foreign account. HeadBucket disambiguates: accessible with
+// EnsureBuckety creates the backend bucket when it is missing.
+// HeadBucket comes first, so a pass that finds the bucket - every
+// periodic re-check of a provisioned Buckety - makes read calls
+// only: CreateBucket is a bucket-management write, the class of
+// call providers throttle, and as an existence probe it ran on
+// every re-check of every Buckety. Only a successful HeadBucket
+// skips CreateBucket; any other answer, 403 included, goes to
+// CreateBucket, which decides as it did before.
+//
+// Creation is idempotent on BucketAlreadyOwnedByYou (a bucket
+// created between the HeadBucket and the CreateBucket, or a
+// HeadBucket that failed for another reason). BucketAlreadyExists
+// is ambiguous: most non-AWS implementations surface it for a
+// caller-owned bucket, but on AWS proper it can mean a
+// global-namespace collision with a foreign account. HeadBucket disambiguates: accessible with
 // this backend's credentials means ours, anything else is a hard
 // error rather than a false Ready=True over a bucket the consumer
 // cannot use.
@@ -173,8 +183,30 @@ func (d *Driver) InspectBuckety(ctx context.Context, name string) (registry.Insp
 // (e.g. MinIO without erasure coding has no versioning; retention
 // rules simply do not expire objects there). Capability-gated
 // parameters (R2's jurisdiction) are immutable at the admission
-// layer and are stamped via CreateBucketConfiguration below.
+// layer and are stamped via CreateBucketConfiguration in
+// createBucket.
 func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) error {
+	// Success: exists and accessible with this backend's
+	// credentials. Anything else goes to CreateBucket rather than
+	// being judged here: a HEAD answer carries no error body, and an
+	// implementation that answers 403 for a bucket the credentials
+	// own would otherwise fail where CreateBucket's
+	// BucketAlreadyOwnedByYou passes. A foreign bucket still ends in
+	// the not-accessible error, via BucketAlreadyExists.
+	if _, herr := d.client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(req.Name)}); herr != nil {
+		if err := d.createBucket(ctx, req); err != nil {
+			return err
+		}
+	}
+	if err := d.reconcileVersioning(ctx, req.Name, req.Parameters); err != nil {
+		return err
+	}
+	return d.reconcileLifecycle(ctx, req.Name, req.Parameters)
+}
+
+// createBucket creates req.Name, treating a bucket that turns out
+// to be ours as success.
+func (d *Driver) createBucket(ctx context.Context, req registry.EnsureRequest) error {
 	input := &awss3.CreateBucketInput{Bucket: aws.String(req.Name)}
 	if cfg := bucketCreationConfig(d.cfg.Implementation, d.cfg.Region, req.Parameters); cfg != nil {
 		input.CreateBucketConfiguration = cfg
@@ -193,10 +225,7 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 	default:
 		return fmt.Errorf("s3: create bucket %q: %w", req.Name, err)
 	}
-	if err := d.reconcileVersioning(ctx, req.Name, req.Parameters); err != nil {
-		return err
-	}
-	return d.reconcileLifecycle(ctx, req.Name, req.Parameters)
+	return nil
 }
 
 // DeleteBuckety removes the backend bucket and its contents -
