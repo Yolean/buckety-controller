@@ -2,6 +2,7 @@ package status
 
 import (
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -78,5 +79,39 @@ func TestChangedBeyondMessages(t *testing.T) {
 	field.Principal = "q"
 	if !ChangedBeyondMessages(base, &field, conds) {
 		t.Error("field change not reported")
+	}
+}
+
+// Only base was persisted: a condition whose status matches base's
+// keeps base's lastTransitionTime whatever happened to it in
+// memory, and one whose status differs keeps its fresh time.
+func TestKeepTransitionTimes(t *testing.T) {
+	old := metav1.NewTime(metav1.Now().Add(-time.Hour).Truncate(time.Second))
+	base := []metav1.Condition{
+		{Type: "Ready", Status: metav1.ConditionTrue, Reason: "EnsuredOnBackend", LastTransitionTime: old},
+		{Type: "Reconciling", Status: metav1.ConditionFalse, Reason: "Idle", LastTransitionTime: old},
+	}
+	cur := append([]metav1.Condition(nil), base...)
+	// A pass that flips Reconciling and back, and moves Ready.
+	Set(&cur, "Reconciling", metav1.ConditionTrue, "Ensuring", "", 1)
+	Set(&cur, "Reconciling", metav1.ConditionFalse, "Idle", "", 1)
+	Set(&cur, "Ready", metav1.ConditionFalse, "EnsureFailed", "x", 1)
+	Set(&cur, "ParameterDrift", metav1.ConditionTrue, "Unreconcilable", "x", 1)
+
+	KeepTransitionTimes(base, cur)
+	for _, c := range cur {
+		switch c.Type {
+		case "Reconciling":
+			if !c.LastTransitionTime.Equal(&old) {
+				t.Errorf("Reconciling ended where it started but its time moved: %v", c.LastTransitionTime)
+			}
+		case "Ready", "ParameterDrift":
+			if c.LastTransitionTime.Equal(&old) || c.LastTransitionTime.IsZero() {
+				t.Errorf("%s transitioned but kept time %v", c.Type, c.LastTransitionTime)
+			}
+		}
+	}
+	if !base[1].LastTransitionTime.Equal(&old) {
+		t.Error("base mutated")
 	}
 }

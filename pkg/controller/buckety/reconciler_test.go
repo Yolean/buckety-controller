@@ -13,6 +13,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
@@ -589,5 +590,178 @@ func TestProvisioningOverdueBecomesFailure(t *testing.T) {
 		if r := meta.FindStatusCondition(got.Status.Conditions, "Ready"); r == nil || r.Reason != want {
 			t.Errorf("%s: Ready condition %+v, want reason %s", c.name, r, want)
 		}
+	}
+}
+
+// A periodic re-check that finds the backend resource as specified
+// must not write status: every write bumps resourceVersion and
+// sends a watch event to every watcher, this controller included.
+// Reconciling goes True while the driver is called and back to
+// False when it returns; that round trip is not a transition, so
+// its lastTransitionTime must stay put. The stored times are aged
+// first, because two passes within one second would hide a moving
+// timestamp (metav1.Time serialises to seconds). Drift detection
+// is unaffected: the driver is still called on every pass, and a
+// real change still updates status with fresh transition times.
+func TestSteadyStateReconcileWritesNoStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := bucketyv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	bky := &bucketyv1.Buckety{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orders", Namespace: "t1", Generation: 1,
+			Finalizers: []string{bucketyv1.FinalizerCleanup},
+		},
+		Spec: bucketyv1.BucketySpec{Backend: "be"},
+		Status: bucketyv1.BucketyStatus{
+			Backend: "be", Driver: "prov", DriverBuildVersion: "0.0.1",
+			BackendResourceName: "t1-orders", Provenance: bucketyv1.ProvenanceCreated,
+		},
+	}
+	statusWrites := 0
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(bky).
+		WithStatusSubresource(&bucketyv1.Buckety{}, &bucketyv1.BucketyAccess{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
+				statusWrites++
+				return c.SubResource(sub).Patch(ctx, obj, p, opts...)
+			},
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				statusWrites++
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	drv := &provisioningDriver{}
+	r := &Reconciler{Client: cl, Scheme: scheme, Config: &config.Loaded{
+		Backends: map[string]config.Backend{"be": {Name: "be", Driver: drv}},
+	}}
+	key := types.NamespacedName{Namespace: "t1", Name: "orders"}
+	req := reconcile.Request{NamespacedName: key}
+	var got bucketyv1.Buckety
+	get := func() {
+		t.Helper()
+		if err := cl.Get(ctx, key, &got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cond := func(typ string) metav1.Condition {
+		t.Helper()
+		c := meta.FindStatusCondition(got.Status.Conditions, typ)
+		if c == nil {
+			t.Fatalf("no %s condition: %+v", typ, got.Status.Conditions)
+		}
+		return *c
+	}
+	aged := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	age := func() {
+		t.Helper()
+		get()
+		for i := range got.Status.Conditions {
+			got.Status.Conditions[i].LastTransitionTime = aged
+		}
+		if err := cl.Status().Update(ctx, &got); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Settle: Ready, Idle.
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	get()
+	if c := cond("Ready"); c.Status != metav1.ConditionTrue {
+		t.Fatalf("not Ready after first pass: %+v", got.Status.Conditions)
+	}
+	age()
+	get()
+	rv := got.ResourceVersion
+
+	// Steady state: the driver is called, nothing is written.
+	statusWrites, drv.ensures = 0, 0
+	for range 3 {
+		res, err := r.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.RequeueAfter != r.Recheck {
+			t.Errorf("steady state RequeueAfter %v, want the re-check cadence %v", res.RequeueAfter, r.Recheck)
+		}
+	}
+	if drv.ensures != 3 {
+		t.Errorf("drift detection: EnsureBuckety called %d times in 3 passes", drv.ensures)
+	}
+	if statusWrites != 0 {
+		t.Errorf("steady-state passes wrote status %d times", statusWrites)
+	}
+	get()
+	if got.ResourceVersion != rv {
+		t.Errorf("steady state bumped resourceVersion %s -> %s", rv, got.ResourceVersion)
+	}
+	if c := cond("Reconciling"); !c.LastTransitionTime.Equal(&aged) || c.Status != metav1.ConditionFalse || c.Reason != "Idle" {
+		t.Errorf("Reconciling moved without a transition: %+v", c)
+	}
+
+	// A real change on the backend side: Ready and Reconciling
+	// transition, with fresh times, in one write.
+	drv.inProgress = true
+	statusWrites = 0
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	get()
+	if statusWrites != 1 {
+		t.Errorf("transition wrote status %d times, want 1", statusWrites)
+	}
+	if c := cond("Ready"); c.Status != metav1.ConditionFalse || c.Reason != "Provisioning" || c.LastTransitionTime.Equal(&aged) {
+		t.Errorf("Ready after backend change: %+v", c)
+	}
+	if c := cond("Reconciling"); c.Status != metav1.ConditionTrue || c.Reason != "Ensuring" || c.LastTransitionTime.Equal(&aged) {
+		t.Errorf("Reconciling after backend change: %+v", c)
+	}
+
+	// Back to Ready: transitions again.
+	drv.inProgress = false
+	age()
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	get()
+	if c := cond("Ready"); c.Status != metav1.ConditionTrue || c.LastTransitionTime.Equal(&aged) {
+		t.Errorf("Ready after recovery: %+v", c)
+	}
+	if c := cond("Reconciling"); c.Status != metav1.ConditionFalse || c.Reason != "Idle" || c.LastTransitionTime.Equal(&aged) {
+		t.Errorf("Reconciling after recovery: %+v", c)
+	}
+
+	// A spec change (new generation) is written: observedGeneration
+	// advances on status and conditions, while Ready, True before
+	// and after, keeps its transition time.
+	age()
+	get()
+	got.Generation = 2
+	got.Spec.Parameters = map[string]string{"k": "v"}
+	if err := cl.Update(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	statusWrites = 0
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	get()
+	if statusWrites != 1 {
+		t.Errorf("spec change wrote status %d times, want 1", statusWrites)
+	}
+	if got.Status.ObservedGeneration != got.Generation {
+		t.Errorf("observedGeneration %d, generation %d", got.Status.ObservedGeneration, got.Generation)
+	}
+	if c := cond("Ready"); c.ObservedGeneration != got.Generation || !c.LastTransitionTime.Equal(&aged) {
+		t.Errorf("Ready after spec change: %+v", c)
 	}
 }
