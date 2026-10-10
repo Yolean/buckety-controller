@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 	"github.com/go-logr/logr"
@@ -73,6 +74,23 @@ type Driver struct {
 	// an existing topic with, so unit tests can observe them
 	// without a broker.
 	mutator topicMutator
+
+	// accepted remembers, per topic and config key, the value the
+	// broker last acknowledged an alter of. Some brokers accept a
+	// key they never report back in DescribeConfigs (Redpanda 24.2
+	// with min.compaction.lag.ms); without this memory every pass
+	// would see the key as missing and alter it again, with an
+	// Event and a log line each time. Process memory only: after
+	// a restart such a key is altered once more.
+	mu       sync.Mutex
+	accepted map[string]map[string]*acceptedConfig
+}
+
+// acceptedConfig is a config value the broker acknowledged.
+// logged records that the "not reported" line was written for it.
+type acceptedConfig struct {
+	value  string
+	logged bool
 }
 
 // topicMutator is the subset of *kadm.Client that alignTopic uses.
@@ -139,6 +157,7 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 		return err
 	}
 	if existing == nil {
+		d.forgetAccepted(req.Name)
 		return d.createTopic(ctx, req.Name, wantParts, wantRF, wantCfgs)
 	}
 	return d.alignTopic(ctx, req, existing, wantParts, wantRF, wantCfgs)
@@ -147,6 +166,7 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 // DeleteBuckety removes the topic. Idempotent on NotFound.
 func (d *Driver) DeleteBuckety(ctx context.Context, req registry.DeleteRequest) error {
 	name := req.Name
+	d.forgetAccepted(name)
 	resp, err := d.aclient.DeleteTopics(ctx, name)
 	if err != nil {
 		return fmt.Errorf("kadm: delete topic %q: %w", name, err)
@@ -424,10 +444,21 @@ func (d *Driver) alignTopic(ctx context.Context, req registry.EnsureRequest, exi
 	// stops being managed.
 	alters := []kadm.AlterConfig{}
 	for k, vp := range wantCfgs {
-		cur, hadCur := existing.configs[k]
-		if vp != nil && (!hadCur || cur != *vp) {
-			alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: k, Value: vp})
+		if vp == nil {
+			continue
 		}
+		cur, hadCur := existing.configs[k]
+		if hadCur && cur == *vp {
+			continue
+		}
+		// A key the broker does not report, at the value it last
+		// acknowledged: nothing observable has changed, so there is
+		// nothing to re-apply. A reported value that differs is
+		// drift and is altered as before.
+		if !hadCur && d.acceptedUnreported(ctx, name, k, *vp) {
+			continue
+		}
+		alters = append(alters, kadm.AlterConfig{Op: kadm.SetConfig, Name: k, Value: vp})
 	}
 	if len(alters) > 0 {
 		resp, err := d.mutator.AlterTopicConfigs(ctx, alters, name)
@@ -442,6 +473,7 @@ func (d *Driver) alignTopic(ctx context.Context, req registry.EnsureRequest, exi
 		// One incremental alter per topic: the broker applies all
 		// keys or none, so success means every key changed.
 		sort.Slice(alters, func(i, j int) bool { return alters[i].Name < alters[j].Name })
+		d.rememberAccepted(name, alters)
 		for _, a := range alters {
 			configChanges.WithLabelValues(req.Namespace, req.BucketyName, name, a.Name).Inc()
 			report(req, registry.Change{
@@ -453,6 +485,49 @@ func (d *Driver) alignTopic(ctx context.Context, req registry.EnsureRequest, exi
 		}
 	}
 	return nil
+}
+
+// acceptedUnreported reports whether value is what the broker last
+// acknowledged for topic's key, logging once per value that the
+// broker does not report the key.
+func (d *Driver) acceptedUnreported(ctx context.Context, topic, key, value string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	a := d.accepted[topic][key]
+	if a == nil || a.value != value {
+		return false
+	}
+	if !a.logged {
+		a.logged = true
+		logr.FromContextOrDiscard(ctx).Info("kadm: broker does not report this topic config; not re-applied while the requested value is unchanged",
+			"topic", topic, "config", key, "value", value)
+	}
+	return true
+}
+
+// rememberAccepted records alters the broker acknowledged.
+func (d *Driver) rememberAccepted(topic string, alters []kadm.AlterConfig) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.accepted == nil {
+		d.accepted = map[string]map[string]*acceptedConfig{}
+	}
+	keys := d.accepted[topic]
+	if keys == nil {
+		keys = map[string]*acceptedConfig{}
+		d.accepted[topic] = keys
+	}
+	for _, a := range alters {
+		keys[a.Name] = &acceptedConfig{value: *a.Value}
+	}
+}
+
+// forgetAccepted drops what was remembered for topic: it is being
+// deleted, or (re)created with the requested configs.
+func (d *Driver) forgetAccepted(topic string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.accepted, topic)
 }
 
 // report calls req.OnChange when the caller asked for changes.
