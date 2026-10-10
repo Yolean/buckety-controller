@@ -104,6 +104,11 @@ Default 5 min `RequeueAfter`. Knob via `--periodic-recheck`
 on the controller binary; documented as deploy-time tuneable,
 not a contract.
 
+Each settled pass returns the cadence moved by up to ±10 %
+(`pkg/controller/cadence`), so objects that reconciled together,
+as all of them do after a controller start, drift apart instead
+of calling their backends in lockstep every period.
+
 ## CI matrix
 
 | Driver | Implementations |

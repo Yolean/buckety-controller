@@ -29,6 +29,7 @@ import (
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
+	"github.com/Yolean/buckety-controller/pkg/controller/cadence"
 	"github.com/Yolean/buckety-controller/pkg/controller/status"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
@@ -194,7 +195,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			// Spec edits re-enqueue via the watch; the periodic
 			// cadence catches the backend resource being emptied
 			// or removed out-of-band.
-			return ctrl.Result{RequeueAfter: r.Recheck}, nil
+			return ctrl.Result{RequeueAfter: cadence.Recheck(r.Recheck)}, nil
 		}
 		if provenance == bucketyv1.ProvenanceAdopted && r.Recorder != nil {
 			r.Recorder.Event(&bky, corev1.EventTypeNormal, "Adopted",
@@ -325,7 +326,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.patchStatus(ctx, &bky, baseBky); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: r.Recheck}, nil
+	return ctrl.Result{RequeueAfter: cadence.Recheck(r.Recheck)}, nil
 }
 
 // reconcileDelete runs the finalizer. A non-empty unavailableReason
@@ -365,7 +366,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		}
 		// Requeue periodically; the BucketyAccess deletions also
 		// re-enqueue this Buckety via the access watch.
-		return ctrl.Result{RequeueAfter: r.Recheck}, nil
+		return ctrl.Result{RequeueAfter: cadence.Recheck(r.Recheck)}, nil
 	}
 
 	// The implicit access is not a deletion blocker, but it must
@@ -431,7 +432,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 			if err := r.patchStatus(ctx, bky, base); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{RequeueAfter: r.Recheck}, nil
+			return ctrl.Result{RequeueAfter: cadence.Recheck(r.Recheck)}, nil
 		}
 		// The same resolved parameter view Ensure operated on, so
 		// the driver can find per-resource principals (gcs
