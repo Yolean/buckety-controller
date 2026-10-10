@@ -7,6 +7,8 @@
 package status
 
 import (
+	"time"
+
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -94,3 +96,9 @@ func withoutMessages(conds []metav1.Condition) []metav1.Condition {
 	}
 	return out
 }
+
+// WriteTimeout bounds a status write made after the pass's own
+// context may have expired (the reconcile timeout fired during a
+// backend call), so the failure the pass ran into still reaches
+// status.
+const WriteTimeout = 10 * time.Second
