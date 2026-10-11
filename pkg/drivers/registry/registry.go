@@ -296,10 +296,16 @@ func IsProvisioningInProgress(err error) bool {
 // ErrDeletionInProgress is the typed error DeleteBuckety returns
 // when a bounded slice of recursive deletion completed but
 // contents remain. Not a failure: the controller surfaces
-// Progress on the resource and requeues promptly instead of
-// backing off.
+// Progress on the resource and requeues promptly while slices
+// make progress.
 type ErrDeletionInProgress struct {
 	Progress string
+	// Stalled says this pass removed nothing and the resource is
+	// still not deletable (a writer racing the teardown, contents
+	// the listing does not show). The controller then backs off
+	// instead of re-listing every 2 s; the zero value means the
+	// pass made progress.
+	Stalled bool
 }
 
 func (e *ErrDeletionInProgress) Error() string {
@@ -311,6 +317,13 @@ func (e *ErrDeletionInProgress) Error() string {
 func IsDeletionInProgress(err error) bool {
 	var d *ErrDeletionInProgress
 	return errors.As(err, &d)
+}
+
+// IsDeletionStalled reports whether err is or wraps an
+// ErrDeletionInProgress whose pass made no progress.
+func IsDeletionStalled(err error) bool {
+	var d *ErrDeletionInProgress
+	return errors.As(err, &d) && d.Stalled
 }
 
 // ---- registry ----

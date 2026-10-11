@@ -1030,8 +1030,9 @@ Semantics:
 - Drivers empty contents in bounded slices, returning a typed
   in-progress signal between slices; the controller surfaces
   progress via a `Ready=False/DeletingContents` condition and
-  requeues promptly. Deletion of large resources is resumable
-  across controller restarts.
+  requeues promptly while slices make progress, backing off
+  when a pass removes nothing. Deletion of large resources is
+  resumable across controller restarts.
 - Store-level protections the data plane placed on individual
   items (GCS object holds, retention policies) are honoured, not
   fought: deletion blocks with an error naming the protected

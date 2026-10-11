@@ -53,6 +53,9 @@ type Reconciler struct {
 	// Wired from mgr.GetAPIReader(); nil falls back to the cached
 	// client (tests).
 	Live client.Reader
+	// deletions paces requeues of teardowns that stopped making
+	// progress (deletebackoff.go).
+	deletions deletionBackoff
 }
 
 // liveReader returns the uncached reader, or the cached client
@@ -460,7 +463,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 				if perr := r.patchStatus(ctx, bky, base); perr != nil {
 					return ctrl.Result{}, perr
 				}
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: r.deletions.next(bky.UID, registry.IsDeletionStalled(err))}, nil
 			}
 			r.surface(bky, base, "Ready", metav1.ConditionFalse, "DeleteFailed", err.Error(), corev1.EventTypeWarning)
 			_ = r.patchStatus(ctx, bky, base)
@@ -468,6 +471,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, bky *bucketyv1.Buckety
 		}
 	}
 	// Remove the finalizer and let GC proceed.
+	r.deletions.forget(bky.UID)
 	controllerutil.RemoveFinalizer(bky, bucketyv1.FinalizerCleanup)
 	if err := r.Update(ctx, bky); err != nil {
 		return ctrl.Result{}, err

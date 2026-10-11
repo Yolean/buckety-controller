@@ -226,8 +226,9 @@ func (d *Driver) DeleteBuckety(ctx context.Context, req registry.DeleteRequest) 
 	}
 	if isBucketNotEmpty(err) {
 		// Raced a writer (or an implementation that hides keys from
-		// our listing); keep chasing instead of failing.
-		return &registry.ErrDeletionInProgress{Progress: fmt.Sprintf("bucket %q: still not empty after emptying pass", name)}
+		// our listing); keep chasing instead of failing, but this
+		// pass deleted nothing, so the controller backs off.
+		return &registry.ErrDeletionInProgress{Progress: fmt.Sprintf("bucket %q: still not empty after emptying pass", name), Stalled: true}
 	}
 	return fmt.Errorf("s3: delete bucket %q: %w", name, err)
 }
