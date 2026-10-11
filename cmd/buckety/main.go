@@ -7,6 +7,7 @@
 //
 //	buckety -c <dir>                 controller config directory
 //	buckety --periodic-recheck=5m    drift re-check cadence
+//	buckety --reconcile-timeout=2m   deadline of one reconcile pass
 //	buckety --metrics-addr=:8080     prometheus metrics endpoint
 //	buckety --health-addr=:8081      healthz/readyz endpoint
 //	buckety --leader-elect=true      leader election for HA
@@ -29,6 +30,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -60,18 +62,20 @@ var version = "dev"
 
 func main() {
 	var (
-		configDir       string
-		periodicRecheck time.Duration
-		metricsAddr     string
-		healthAddr      string
-		enableWebhook   bool
-		webhookPort     int
-		certDir         string
-		leaderElect     bool
-		printVersion    bool
+		configDir        string
+		periodicRecheck  time.Duration
+		reconcileTimeout time.Duration
+		metricsAddr      string
+		healthAddr       string
+		enableWebhook    bool
+		webhookPort      int
+		certDir          string
+		leaderElect      bool
+		printVersion     bool
 	)
 	flag.StringVar(&configDir, "c", "/etc/buckety", "directory containing buckety-controller.yaml")
 	flag.DurationVar(&periodicRecheck, "periodic-recheck", 5*time.Minute, "how often to re-list resources for drift detection")
+	flag.DurationVar(&reconcileTimeout, "reconcile-timeout", defaultReconcileTimeout, "deadline of one reconcile pass, backend calls included; a pass that exceeds it fails with the context error and is retried with backoff, so one unresponsive backend cannot hold the controller's workers indefinitely (0 disables)")
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "metrics endpoint bind address")
 	flag.StringVar(&healthAddr, "health-addr", ":8081", "healthz/readyz endpoint bind address")
 	flag.BoolVar(&enableWebhook, "enable-webhook", true, "run the validating admission webhook server; set --enable-webhook=false on clusters without cert-manager (also drop deploy/kustomize/controller/webhook.yaml from the overlay). With webhook disabled, per-driver parameter validation moves to the reconcile loop and surfaces on the resource's status instead of failing the apply.")
@@ -102,27 +106,7 @@ func main() {
 	}
 	setupLog.Info("config loaded", "backends", backendNames(loaded))
 
-	mgrOpts := ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
-		HealthProbeBindAddress: healthAddr,
-		LeaderElection:         leaderElect,
-		LeaderElectionID:       "buckety-controller-leader",
-		// The Secret informer is scoped to controller-minted
-		// Secrets; unscoped, the Owns() watch LISTs and caches
-		// every Secret in the cluster, and controller memory
-		// tracks cluster size instead of buckety usage (OOMKilled
-		// at default limits on a multi-site cluster, issue #10).
-		// Reads that must see unlabelled Secrets go through
-		// mgr.GetAPIReader() (see the access reconciler's Live).
-		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Secret{}: {Label: labels.SelectorFromSet(labels.Set{
-					bucketyv1.LabelOwnedSecret: "true",
-				})},
-			},
-		},
-	}
+	mgrOpts := managerOptions(scheme, metricsAddr, healthAddr, leaderElect, reconcileTimeout)
 	if enableWebhook {
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
 			Port:    webhookPort,
@@ -186,6 +170,46 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager Start returned")
 		os.Exit(1)
+	}
+}
+
+// defaultReconcileTimeout bounds one reconcile pass. The slowest
+// legitimate pass (a kadm alter riding out its client retries, a
+// mysql password change verified against a replicating cluster,
+// one teardown slice) takes seconds; minutes mean a backend that
+// stopped answering.
+const defaultReconcileTimeout = 2 * time.Minute
+
+// managerOptions are the manager's options from the command line,
+// without the webhook server.
+func managerOptions(scheme *runtime.Scheme, metricsAddr, healthAddr string, leaderElect bool, reconcileTimeout time.Duration) ctrl.Options {
+	return ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress: healthAddr,
+		LeaderElection:         leaderElect,
+		LeaderElectionID:       "buckety-controller-leader",
+		// Every controller of the manager: a pass whose backend
+		// stops answering fails with the context error after
+		// reconcileTimeout instead of holding a worker - with one
+		// worker per controller, every other object - until the
+		// backend comes back. The failure is retried with the
+		// workqueue's backoff and surfaces on status.
+		Controller: ctrlconfig.Controller{ReconciliationTimeout: reconcileTimeout},
+		// The Secret informer is scoped to controller-minted
+		// Secrets; unscoped, the Owns() watch LISTs and caches
+		// every Secret in the cluster, and controller memory
+		// tracks cluster size instead of buckety usage (OOMKilled
+		// at default limits on a multi-site cluster, issue #10).
+		// Reads that must see unlabelled Secrets go through
+		// mgr.GetAPIReader() (see the access reconciler's Live).
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}: {Label: labels.SelectorFromSet(labels.Set{
+					bucketyv1.LabelOwnedSecret: "true",
+				})},
+			},
+		},
 	}
 }
 

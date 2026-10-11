@@ -635,11 +635,15 @@ func majorOf(v string) (int, error) {
 // prevents is ISSUE_status_message_reconcile_loop.md), and keeps
 // base's lastTransitionTime on conditions whose status did not
 // change against base (status.KeepTransitionTimes), so a
-// reconcile that finds nothing changed writes nothing.
+// reconcile that finds nothing changed writes nothing. The write
+// outlives the pass's context, so a pass cut short by the reconcile
+// timeout still records why.
 func (r *Reconciler) patchStatus(ctx context.Context, bky, base *bucketyv1.Buckety) error {
 	status.KeepTransitionTimes(base.Status.Conditions, bky.Status.Conditions)
 	if !status.ChangedBeyondMessages(&base.Status, &bky.Status, func(s *bucketyv1.BucketyStatus) *[]metav1.Condition { return &s.Conditions }) {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), status.WriteTimeout)
+	defer cancel()
 	return r.Status().Patch(ctx, bky, client.MergeFrom(base))
 }
