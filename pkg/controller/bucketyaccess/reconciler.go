@@ -40,6 +40,9 @@ type Reconciler struct {
 	// Recheck is the periodic re-check cadence returned from every
 	// settled reconcile; zero disables it (tests).
 	Recheck time.Duration
+	// startup spreads the first grant check over settled accesses
+	// after a controller start across one re-check period.
+	startup cadence.Startup
 	// Recorder emits Events alongside failure conditions so
 	// `kubectl describe` tells the story; nil disables (tests).
 	Recorder record.EventRecorder
@@ -112,6 +115,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var access bucketyv1.BucketyAccess
 	if err := r.Get(ctx, req.NamespacedName, &access); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.startup.Forget(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -272,6 +276,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var existingData map[string][]byte
 	if getErr == nil {
 		existingData = existing.Data
+	}
+
+	// After a controller start, an access that was Ready for its
+	// current generation and still has its Secret waits for its
+	// first grant check like for a periodic re-check, instead of
+	// every access calling the backend (a login, a key listing) in
+	// the start-up burst. A missing Secret, a new generation or a
+	// failing access is handled at once.
+	settled := getErr == nil &&
+		access.Status.ObservedGeneration == access.Generation &&
+		meta.IsStatusConditionTrue(access.Status.Conditions, "Ready")
+	if d := r.startup.Defer(req.NamespacedName, settled, r.Recheck); d > 0 {
+		return ctrl.Result{RequeueAfter: d}, nil
 	}
 
 	res, err := backend.Driver.GrantAccess(ctx, registry.GrantRequest{

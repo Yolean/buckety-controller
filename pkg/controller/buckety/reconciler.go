@@ -44,6 +44,9 @@ type Reconciler struct {
 	// Recheck is the periodic re-check cadence returned from every
 	// settled reconcile; zero disables it (tests).
 	Recheck time.Duration
+	// startup spreads the first pass over settled Bucketies after
+	// a controller start across one re-check period.
+	startup cadence.Startup
 	// Recorder emits Events alongside condition changes so
 	// `kubectl describe` tells the story; nil disables (tests).
 	Recorder record.EventRecorder
@@ -108,6 +111,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.Get(ctx, req.NamespacedName, &bky); err != nil {
 		if apierrors.IsNotFound(err) {
 			forgetDrift(req.Namespace, req.Name)
+			r.startup.Forget(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -149,6 +153,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		patch := client.MergeFrom(bky.DeepCopy())
 		controllerutil.AddFinalizer(&bky, bucketyv1.FinalizerCleanup)
 		return ctrl.Result{}, r.Patch(ctx, &bky, patch)
+	}
+
+	// After a controller start, a Buckety that was settled under
+	// this same driver build waits for its first pass like for a
+	// periodic re-check, instead of every Buckety calling its
+	// backend in the start-up burst. Anything pending (a new
+	// generation, not Ready, a new driver build, an unavailable
+	// backend) is reconciled at once.
+	settled := unavailableReason == "" &&
+		bky.Status.ObservedGeneration == bky.Generation &&
+		bky.Status.DriverBuildVersion == backend.Driver.Version() &&
+		meta.IsStatusConditionTrue(bky.Status.Conditions, "Ready")
+	if d := r.startup.Defer(req.NamespacedName, settled, r.Recheck); d > 0 {
+		return ctrl.Result{RequeueAfter: d}, nil
 	}
 
 	// Snapshot for status patching; tolerates concurrent RV bumps
