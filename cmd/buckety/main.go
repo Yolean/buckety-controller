@@ -11,6 +11,7 @@
 //	buckety --metrics-addr=:8080     prometheus metrics endpoint
 //	buckety --health-addr=:8081      healthz/readyz endpoint
 //	buckety --leader-elect=true      leader election for HA
+//	buckety --leader-elect-lease-duration=60s --leader-elect-renew-deadline=40s --leader-elect-retry-period=15s
 //	buckety --version                print binary + driver versions and exit
 package main
 
@@ -71,6 +72,7 @@ func main() {
 		webhookPort      int
 		certDir          string
 		leaderElect      bool
+		lease            leaseTiming
 		printVersion     bool
 	)
 	flag.StringVar(&configDir, "c", "/etc/buckety", "directory containing buckety-controller.yaml")
@@ -82,6 +84,9 @@ func main() {
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "validating webhook port (ignored when --enable-webhook=false)")
 	flag.StringVar(&certDir, "cert-dir", "/var/run/buckety/webhook-tls", "directory containing tls.crt + tls.key for the webhook server (ignored when --enable-webhook=false)")
 	flag.BoolVar(&leaderElect, "leader-elect", true, "enable leader election so a single replica is active during rollouts")
+	flag.DurationVar(&lease.duration, "leader-elect-lease-duration", defaultLease.duration, "how long a lease the leader stopped renewing blocks another replica from taking over")
+	flag.DurationVar(&lease.renewDeadline, "leader-elect-renew-deadline", defaultLease.renewDeadline, "how long the leader keeps retrying a failed lease renewal before it gives up leadership (and the process exits); each request may take half of it")
+	flag.DurationVar(&lease.retryPeriod, "leader-elect-retry-period", defaultLease.retryPeriod, "how often the leader renews its lease, and how often a candidate tries to acquire it")
 	flag.BoolVar(&printVersion, "version", false, "print binary + driver versions and exit")
 	flag.Parse()
 
@@ -106,7 +111,7 @@ func main() {
 	}
 	setupLog.Info("config loaded", "backends", backendNames(loaded))
 
-	mgrOpts := managerOptions(scheme, metricsAddr, healthAddr, leaderElect, reconcileTimeout)
+	mgrOpts := managerOptions(scheme, metricsAddr, healthAddr, leaderElect, lease, reconcileTimeout)
 	if enableWebhook {
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
 			Port:    webhookPort,
@@ -180,15 +185,43 @@ func main() {
 // stopped answering.
 const defaultReconcileTimeout = 2 * time.Minute
 
+// leaseTiming is the leader election lease timing.
+type leaseTiming struct {
+	duration, renewDeadline, retryPeriod time.Duration
+}
+
+// defaultLease tolerates a slow apiserver. controller-runtime's
+// defaults (15s lease, 10s renew deadline, 2s retry period, so 5s
+// per request) end leadership, and with it the process, when the
+// apiserver answers one lease update slower than 5s twice in a row:
+// a single-node cluster under load does that, and each loss
+// restarts the controller and re-runs every reconcile. Longer
+// timing only delays a takeover after a leader dies without
+// releasing (graceful stops release, see managerOptions), and the
+// lease is renewed every 15s instead of every 2s.
+var defaultLease = leaseTiming{
+	duration:      60 * time.Second,
+	renewDeadline: 40 * time.Second,
+	retryPeriod:   15 * time.Second,
+}
+
 // managerOptions are the manager's options from the command line,
 // without the webhook server.
-func managerOptions(scheme *runtime.Scheme, metricsAddr, healthAddr string, leaderElect bool, reconcileTimeout time.Duration) ctrl.Options {
+func managerOptions(scheme *runtime.Scheme, metricsAddr, healthAddr string, leaderElect bool, lease leaseTiming, reconcileTimeout time.Duration) ctrl.Options {
 	return ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: healthAddr,
 		LeaderElection:         leaderElect,
 		LeaderElectionID:       "buckety-controller-leader",
+		LeaseDuration:          &lease.duration,
+		RenewDeadline:          &lease.renewDeadline,
+		RetryPeriod:            &lease.retryPeriod,
+		// main returns right after the manager stops, which is what
+		// releasing on cancel requires: a stopped leader frees the
+		// lease, and its successor (the Deployment recreates the
+		// Pod) starts at once instead of waiting out the lease.
+		LeaderElectionReleaseOnCancel: true,
 		// Every controller of the manager: a pass whose backend
 		// stops answering fails with the context error after
 		// reconcileTimeout instead of holding a worker - with one

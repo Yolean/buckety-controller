@@ -172,6 +172,15 @@ EOF
 restart_controller() {
   kubectl -n "$CONTROLLER_NS" rollout restart deploy/buckety-controller
   kubectl -n "$CONTROLLER_NS" rollout status deploy/buckety-controller --timeout=180s
+  # rollout status returns while the old Pod is still terminating,
+  # and it can lead for a moment with the previous config; the next
+  # one takes over as soon as it releases the lease. Wait for it to
+  # be gone so no scenario meets it.
+  local deadline=$(( $(date +%s) + 120 ))
+  while (( $(kubectl -n "$CONTROLLER_NS" get pods -l app.kubernetes.io/name=buckety-controller -o name | wc -l) > 1 )); do
+    (( $(date +%s) < deadline )) || fail "an old buckety-controller Pod is still terminating after 120s"
+    sleep 1
+  done
 }
 
 # ---- scenario discovery and execution -------------------------
