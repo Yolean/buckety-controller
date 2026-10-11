@@ -449,6 +449,10 @@ Two categories of parameter keys:
    own validation catches typos; the driver SHOULD document which
    `config.*` keys are immutable on the backend side and surface
    `ParameterDrift` conditions where it can't reconcile in place.
+   A `config.*` key removed from `spec.parameters` is not reverted:
+   the backend keeps the value last applied, unmanaged, because
+   what it would fall back to is the backend's business. Admission
+   allows the update with a warning naming the removed keys.
 
 Naming conventions per driver:
 
