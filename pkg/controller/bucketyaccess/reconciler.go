@@ -27,6 +27,7 @@ import (
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
 	"github.com/Yolean/buckety-controller/pkg/config"
+	"github.com/Yolean/buckety-controller/pkg/controller/cadence"
 	"github.com/Yolean/buckety-controller/pkg/controller/status"
 	"github.com/Yolean/buckety-controller/pkg/drivers/registry"
 )
@@ -152,7 +153,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 					if err := r.patchStatus(ctx, &access, base); err != nil {
 						return ctrl.Result{}, err
 					}
-					return ctrl.Result{RequeueAfter: r.Recheck}, nil
+					return ctrl.Result{RequeueAfter: cadence.Recheck(r.Recheck)}, nil
 				}
 				if ok {
 					if err := backend.Driver.RevokeAccess(ctx, access.Status.Principal); err != nil {
@@ -211,7 +212,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			"Buckety is not Ready yet; will retry",
 			access.Generation)
 		_ = r.patchStatus(ctx, &access, baseAccess)
-		return ctrl.Result{RequeueAfter: r.Recheck}, nil
+		return ctrl.Result{RequeueAfter: cadence.Recheck(r.Recheck)}, nil
 	}
 
 	backend, ok := r.Config.Lookup(bky.Status.Backend)
@@ -264,7 +265,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		// Periodic requeue notices when the conflicting Secret goes
 		// away (an unowned Secret's deletion maps to no watch).
-		return ctrl.Result{RequeueAfter: r.Recheck}, nil
+		return ctrl.Result{RequeueAfter: cadence.Recheck(r.Recheck)}, nil
 	case getErr != nil && !apierrors.IsNotFound(getErr):
 		return ctrl.Result{}, getErr
 	}
@@ -370,7 +371,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.patchStatus(ctx, &access, baseAccess); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: r.Recheck}, nil
+	return ctrl.Result{RequeueAfter: cadence.Recheck(r.Recheck)}, nil
 }
 
 // writeSecret creates or updates the access's credentials Secret
