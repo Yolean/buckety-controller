@@ -499,7 +499,12 @@ reconcile that changes nothing logs nothing, so these two lines
 are the record of what the controller took on and changed. A config counter that keeps rising for the same key means
 the broker reports the value differently from how the spec writes
 it, so every re-check sets it again; write the value in the
-broker's form.
+broker's form. A key the broker accepts but does not report at all
+(Redpanda 24.2 with `min.compaction.lag.ms`) is set once per
+controller process and then left alone while `config.<key>` keeps
+the value the broker acknowledged, with one info log line saying
+the broker does not report it; a change to the requested value is
+set again.
 
 Suggested alerts. The counters exist at `0` from the first
 reconcile of a topic, so `increase()` catches later changes. The
