@@ -42,6 +42,25 @@ func Event(rec record.EventRecorder, obj runtime.Object, base []metav1.Condition
 	rec.Event(obj, eventType, eventReason, msg)
 }
 
+// KeepTransitionTimes gives every condition in cur whose status
+// equals that of the same-typed condition in base the base's
+// LastTransitionTime. Only base was persisted, so only a status
+// change against base is a transition: a reconcile that flips a
+// condition in memory and back (Reconciling True while it calls
+// the driver, False once done) has not transitioned anything, and
+// leaving meta.SetStatusCondition's fresh timestamp from the
+// flip-back in place would write status on every periodic
+// re-check - a resourceVersion bump and a watch event to every
+// watcher, the controller's own included, for no change at all.
+// Call it before ChangedBeyondMessages and the patch.
+func KeepTransitionTimes(base, cur []metav1.Condition) {
+	for i := range cur {
+		if b := meta.FindStatusCondition(base, cur[i].Type); b != nil && b.Status == cur[i].Status {
+			cur[i].LastTransitionTime = b.LastTransitionTime
+		}
+	}
+}
+
 // ChangedBeyondMessages reports whether two statuses differ in
 // anything except condition messages. conds selects the
 // conditions slice of the status struct S, whose other fields

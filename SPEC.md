@@ -690,6 +690,12 @@ specified:
   request or error id) would otherwise re-trigger the controller
   through its own watch at the provider's answer rate. The
   condition's status and reason are always current.
+- A re-check that finds nothing changed writes no status. A
+  condition's `lastTransitionTime` moves only when its status
+  differs from the stored one; the controller may flip a
+  condition while it works (`Reconciling=True` during the driver
+  call), but a pass that ends where it started has not
+  transitioned, so steady state costs watchers no events.
 
 ## Off the data path
 

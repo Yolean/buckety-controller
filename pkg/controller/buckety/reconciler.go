@@ -632,8 +632,12 @@ func majorOf(v string) (int, error) {
 // patchStatus writes status only when something OTHER than
 // condition messages changed since base
 // (status.ChangedBeyondMessages has the rationale; the loop it
-// prevents is ISSUE_status_message_reconcile_loop.md).
+// prevents is ISSUE_status_message_reconcile_loop.md), and keeps
+// base's lastTransitionTime on conditions whose status did not
+// change against base (status.KeepTransitionTimes), so a
+// reconcile that finds nothing changed writes nothing.
 func (r *Reconciler) patchStatus(ctx context.Context, bky, base *bucketyv1.Buckety) error {
+	status.KeepTransitionTimes(base.Status.Conditions, bky.Status.Conditions)
 	if !status.ChangedBeyondMessages(&base.Status, &bky.Status, func(s *bucketyv1.BucketyStatus) *[]metav1.Condition { return &s.Conditions }) {
 		return nil
 	}
