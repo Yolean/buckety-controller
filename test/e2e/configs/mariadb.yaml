@@ -10,5 +10,9 @@ backends:
     host: mysql.mysql.svc.cluster.local
     adminUser: buckety
     adminPassword: ${MYSQL_BUCKETY_PASSWORD}
+    # examples/mysql/oob-drift asserts that a dropped user, extra
+    # grants and a rotated password are repaired within a few 15 s
+    # re-checks; the default 30m would hide them.
+    accountCheckInterval: 0s
   defaults:
     zone: e2e

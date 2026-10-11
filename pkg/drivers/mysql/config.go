@@ -44,6 +44,14 @@ type Config struct {
 	// TLS, when present, requires verified TLS for the controller's
 	// connections (admin and login checks).
 	TLS *TLSConfig `json:"tls,omitempty"`
+	// AccountCheckInterval is how long a passed account check
+	// stands (see verified.go), as a Go duration. Defaults to 30m;
+	// "0s" checks every access on every pass.
+	AccountCheckInterval string `json:"accountCheckInterval,omitempty"`
+
+	// accountCheckInterval is AccountCheckInterval parsed by
+	// decodeConfig.
+	accountCheckInterval time.Duration
 }
 
 // TLSConfig enables verified TLS towards the server.
@@ -75,6 +83,14 @@ func decodeConfig(raw json.RawMessage) (*Config, error) {
 	}
 	if err := c.validate(); err != nil {
 		return nil, fmt.Errorf("mysql config: %w", err)
+	}
+	c.accountCheckInterval = defaultVerifyInterval
+	if c.AccountCheckInterval != "" {
+		d, err := time.ParseDuration(c.AccountCheckInterval)
+		if err != nil || d < 0 {
+			return nil, fmt.Errorf("mysql config: accountCheckInterval %q must be a non-negative Go duration such as 30m, or 0s to check on every pass", c.AccountCheckInterval)
+		}
+		c.accountCheckInterval = d
 	}
 	return &c, nil
 }

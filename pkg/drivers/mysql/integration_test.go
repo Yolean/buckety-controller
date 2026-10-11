@@ -73,7 +73,10 @@ func TestIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sc := d.conn.(*sqlConn)
+	// Every step re-checks right after an out-of-band change, so
+	// the passed-check memory would hide the change it repairs.
+	d.verifyInterval = 0
+	sc := d.conn.(*breakerConn).inner.(*sqlConn)
 	admin := sc.admin
 	ctx := context.Background()
 

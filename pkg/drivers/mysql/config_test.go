@@ -204,3 +204,33 @@ func writeTestCA(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+func TestDecodeConfigAccountCheckInterval(t *testing.T) {
+	t.Setenv("MYSQL_BUCKETY_PASSWORD", testAdminPassword)
+	base := "host: db\nadminUser: buckety\nadminPassword: ${MYSQL_BUCKETY_PASSWORD}\n"
+	for y, want := range map[string]time.Duration{
+		base:                                   30 * time.Minute,
+		base + "accountCheckInterval: 0s\n":    0,
+		base + "accountCheckInterval: 1h30m\n": 90 * time.Minute,
+	} {
+		c, err := decodeConfig(rawConfig(t, y))
+		if err != nil {
+			t.Fatalf("%q: %v", y, err)
+		}
+		if c.accountCheckInterval != want {
+			t.Errorf("%q: interval %v, want %v", y, c.accountCheckInterval, want)
+		}
+		d, err := newDriver(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.verifyInterval != want {
+			t.Errorf("%q: driver interval %v, want %v", y, d.verifyInterval, want)
+		}
+	}
+	for _, v := range []string{"30", "-1m", "soon"} {
+		if _, err := decodeConfig(rawConfig(t, base+"accountCheckInterval: \""+v+"\"\n")); err == nil {
+			t.Errorf("accountCheckInterval %q accepted", v)
+		}
+	}
+}
