@@ -506,6 +506,17 @@ the value the broker acknowledged, with one info log line saying
 the broker does not report it; a change to the requested value is
 set again.
 
+Removing a `config.*` key from a `Buckety` does not revert it: the
+topic keeps the value last applied, and the controller stops
+managing it. What the broker would fall back to (its default, a
+broker-level setting) is not something the controller can predict.
+To make that visible, the admission webhook allows the apply with a
+warning (`kubectl apply` prints it) naming the removed keys, and the
+controller logs the same message once per such apply. To go back to
+the broker's default, delete the override on the broker
+(`kafka-configs --alter --delete-config`, `rpk topic alter-config
+--delete`).
+
 Suggested alerts. The counters exist at `0` from the first
 reconcile of a topic, so `increase()` catches later changes. The
 first reconcile of a newly adopted `Buckety` (or the

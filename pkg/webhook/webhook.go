@@ -13,9 +13,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	bucketyv1 "github.com/Yolean/buckety-controller/pkg/api/v1alpha1"
@@ -48,7 +51,7 @@ func (v *Validator) Handle(ctx context.Context, req admission.Request) admission
 	}
 }
 
-func (v *Validator) validateBuckety(_ context.Context, req admission.Request) admission.Response {
+func (v *Validator) validateBuckety(ctx context.Context, req admission.Request) admission.Response {
 	if req.Operation == admissionv1.Delete {
 		return admission.Allowed("")
 	}
@@ -96,6 +99,7 @@ func (v *Validator) validateBuckety(_ context.Context, req admission.Request) ad
 		return admission.Denied(fmt.Sprintf("spec.parameters: %v", err))
 	}
 
+	var warnings []string
 	if req.Operation == admissionv1.Update && len(req.OldObject.Raw) > 0 {
 		var old bucketyv1.Buckety
 		if err := json.Unmarshal(req.OldObject.Raw, &old); err != nil {
@@ -115,6 +119,14 @@ func (v *Validator) validateBuckety(_ context.Context, req admission.Request) ad
 		if err := backend.Driver.ValidateUpdateParameters(oldParams, params); err != nil {
 			return admission.Denied(fmt.Sprintf("spec.parameters: %v", err))
 		}
+		if removed := removedConfigKeys(oldParams, params); len(removed) > 0 {
+			msg := fmt.Sprintf("spec.parameters: %s removed; the backend keeps the value last applied, which buckety no longer manages (pass-through config.* keys are not reverted)", strings.Join(removed, ", "))
+			warnings = append(warnings, msg)
+			// kubectl diff and --dry-run=server are not applies.
+			if req.DryRun == nil || !*req.DryRun {
+				logf.FromContext(ctx).Info(msg, "namespace", bky.Namespace, "buckety", bky.Name, "removed", removed)
+			}
+		}
 	} else if err := backend.Driver.ValidateParameters(params); err != nil {
 		return admission.Denied(fmt.Sprintf("spec.parameters: %v", err))
 	}
@@ -124,7 +136,27 @@ func (v *Validator) validateBuckety(_ context.Context, req admission.Request) ad
 		return admission.Denied("spec.defaultAccess.credentialsSecretName is required when defaultAccess is set")
 	}
 
-	return admission.Allowed("")
+	return admission.Allowed("").WithWarnings(warnings...)
+}
+
+// removedConfigKeys returns the pass-through config.* keys (SPEC
+// "Parameters", category 2) that oldParams has and newParams does
+// not, sorted. Both are merged views, so a key that falls back to a
+// backend default is not removed. Drivers do not revert such a key:
+// an omitted parameter means "pass nothing", and what the backend
+// does with a deleted override (its default, a broker-level value,
+// whatever the server version decides) is not something the
+// controller can predict. The value last applied stays in place,
+// unmanaged, so the apply that drops it gets a warning instead.
+func removedConfigKeys(oldParams, newParams map[string]string) []string {
+	var removed []string
+	for k := range oldParams {
+		if _, ok := newParams[k]; !ok && strings.HasPrefix(k, "config.") {
+			removed = append(removed, k)
+		}
+	}
+	sort.Strings(removed)
+	return removed
 }
 
 func (v *Validator) validateAccess(_ context.Context, req admission.Request) admission.Response {
