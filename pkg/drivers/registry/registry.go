@@ -251,6 +251,18 @@ func TemplatedParameters(d Driver) []string {
 	return nil
 }
 
+// ForgetBuckety tells a driver with the optional capability that
+// the Buckety namespace/name is gone, so it can drop what it keeps
+// per Buckety, such as the metric series it exports. Drivers
+// without it are skipped. The controller calls it on every backend
+// once the object no longer exists, whatever its retentionPolicy:
+// DeleteBuckety runs only for retentionPolicy=Delete.
+func ForgetBuckety(d Driver, namespace, name string) {
+	if f, ok := d.(interface{ ForgetBuckety(namespace, name string) }); ok {
+		f.ForgetBuckety(namespace, name)
+	}
+}
+
 // ErrParameterDrift is the typed error EnsureBuckety returns when
 // it observes drift on the backend it cannot reconcile in place
 // (e.g. Kafka partition shrink). The controller maps this to a

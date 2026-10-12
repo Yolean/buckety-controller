@@ -30,6 +30,24 @@ var (
 	}, []string{"namespace", "buckety", "topic", "key"})
 )
 
+// Gauges for the topic configuration the broker reports as in
+// effect (effective.go): configuration only, never the topic's
+// state (sizes, offsets, partitions, replicas), which Kafka
+// exporters already measure. Set from the DescribeConfigs answer
+// every reconcile of the Buckety already reads, so they cost no
+// extra broker call, and are as fresh as the re-check cadence.
+var (
+	topicConfig = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "buckety_kadm_topic_config",
+		Help: "Effective value of a topic config key as the broker reports it, whether set on the topic or inherited from the broker's config or built-in default (source: topic, broker, default, unknown); -1 means unlimited for retention.ms and retention.bytes. Configuration only, nothing about the topic's state.",
+	}, []string{"namespace", "buckety", "topic", "key", "source"})
+
+	topicCleanupPolicy = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "buckety_kadm_topic_cleanup_policy",
+		Help: "1 for the topic's effective cleanup.policy (policy: delete, compact or compact,delete as the broker reports it), with the same source label as buckety_kadm_topic_config.",
+	}, []string{"namespace", "buckety", "topic", "policy", "source"})
+)
+
 func init() {
-	crmetrics.Registry.MustRegister(partitionsAdded, configChanges)
+	crmetrics.Registry.MustRegister(partitionsAdded, configChanges, topicConfig, topicCleanupPolicy)
 }

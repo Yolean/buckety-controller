@@ -84,6 +84,10 @@ type Driver struct {
 	// a restart such a key is altered once more.
 	mu       sync.Mutex
 	accepted map[string]map[string]*acceptedConfig
+
+	// effective tracks the effective config series exported per
+	// Buckety (effective.go).
+	effective effectiveExport
 }
 
 // acceptedConfig is a config value the broker acknowledged.
@@ -160,6 +164,7 @@ func (d *Driver) EnsureBuckety(ctx context.Context, req registry.EnsureRequest) 
 		d.forgetAccepted(req.Name)
 		return d.createTopic(ctx, req.Name, wantParts, wantRF, wantCfgs)
 	}
+	d.recordEffective(req.Namespace, req.BucketyName, req.Name, existing)
 	return d.alignTopic(ctx, req, existing, wantParts, wantRF, wantCfgs)
 }
 
@@ -287,6 +292,9 @@ type topicView struct {
 	partitions int32
 	rf         int16
 	configs    map[string]string
+	// sources says where the broker took each value in configs
+	// from: the topic's override, broker config or a default.
+	sources map[string]kmsg.ConfigSource
 }
 
 // topicExists asks the brokers directly. kadm's ListTopics (which
@@ -351,6 +359,7 @@ func (d *Driver) describeTopic(ctx context.Context, name string) (*topicView, er
 		return nil, fmt.Errorf("kadm: describe configs %q: %w", name, err)
 	}
 	view.configs = make(map[string]string)
+	view.sources = make(map[string]kmsg.ConfigSource)
 	for _, rc := range cfgs {
 		if rc.Err != nil {
 			// Skipping would leave the config view empty, and the
@@ -361,6 +370,7 @@ func (d *Driver) describeTopic(ctx context.Context, name string) (*topicView, er
 		for _, c := range rc.Configs {
 			if c.Value != nil {
 				view.configs[c.Key] = *c.Value
+				view.sources[c.Key] = c.Source
 			}
 		}
 	}
@@ -474,6 +484,7 @@ func (d *Driver) alignTopic(ctx context.Context, req registry.EnsureRequest, exi
 		// keys or none, so success means every key changed.
 		sort.Slice(alters, func(i, j int) bool { return alters[i].Name < alters[j].Name })
 		d.rememberAccepted(name, alters)
+		d.recordAltered(req.Namespace, req.BucketyName, name, alters)
 		for _, a := range alters {
 			configChanges.WithLabelValues(req.Namespace, req.BucketyName, name, a.Name).Inc()
 			report(req, registry.Change{
