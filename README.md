@@ -481,6 +481,8 @@ resources, never parameter values, so there is one series per
 | `buckety_parameter_drift` | gauge | `namespace`, `buckety`, `backend` | `1` while the `Buckety` has `ParameterDrift=True` (any driver), `0` otherwise; removed when the `Buckety` is deleted. |
 | `buckety_kadm_partitions_added_total` | counter | `namespace`, `buckety`, `topic` | Partitions the `kadm` driver added to an existing topic because `parameters.partitions` asked for more than the topic had. |
 | `buckety_kadm_config_changes_total` | counter | `namespace`, `buckety`, `topic`, `key` | Topic config keys (Kafka names, e.g. `retention.ms`) the `kadm` driver set on an existing topic because the broker's value differed from `config.<key>`. |
+| `buckety_kadm_topic_config` | gauge | `namespace`, `buckety`, `topic`, `key`, `source` | Effective value of a topic config key as the broker reports it: `retention.ms`, `retention.bytes`, `delete.retention.ms`, `min.compaction.lag.ms`, `max.compaction.lag.ms`, `min.cleanable.dirty.ratio`, `segment.ms`, `segment.bytes`, `max.message.bytes`, `min.insync.replicas`. `source` is `topic` (an override on the topic), `broker` (broker or cluster config), `default` (built-in) or `unknown`. `-1` means unlimited for the retention keys. |
+| `buckety_kadm_topic_cleanup_policy` | gauge | `namespace`, `buckety`, `topic`, `policy`, `source` | `1` for the topic's effective `cleanup.policy` (`delete`, `compact`, `compact,delete`), with `source` as above. |
 
 The `kadm` driver reconciles partition increases and `config.*`
 differences in place, on every reconcile and periodic re-check;
@@ -515,7 +517,35 @@ warning (`kubectl apply` prints it) naming the removed keys, and the
 controller logs the same message once per such apply. To go back to
 the broker's default, delete the override on the broker
 (`kafka-configs --alter --delete-config`, `rpk topic alter-config
---delete`).
+--delete`). `buckety_kadm_topic_config` with `source="topic"` shows
+which overrides a topic still carries.
+
+The two `buckety_kadm_topic_*` gauges say what retention,
+compaction and size limits a topic actually has. A broker merges
+topic overrides with its own config and defaults, so the
+`Buckety`'s parameters do not tell: a topic whose spec says nothing
+about `retention.ms` keeps records for as long as the broker's
+default says (forever on a Kafka with `log.retention.hours=-1`,
+7 days on a default Redpanda), and a key removed from the spec
+stays on the topic as an override. They are configuration only;
+the topic's state (sizes, offsets, partitions, replicas, lag)
+belongs to Kafka exporters such as kminion. Values come from the
+DescribeConfigs call every reconcile already makes, so they are as
+fresh as the re-check cadence, and an alter the broker acknowledged
+shows at once with `source="topic"`. A key the broker does not
+report (Redpanda 24.2 with `min.compaction.lag.ms`) has no series.
+A topic's series appear with the first reconcile that finds it
+existing: shortly after the pass that created it (seconds to tens
+of seconds, while the client's metadata catches up), or, after a
+controller start, the first pass of its `Buckety`, which for a
+settled `Buckety` can be up to one `--periodic-recheck` later. For example:
+
+```promql
+# topics of a Buckety name that will delete records by time
+buckety_kadm_topic_config{buckety="orders-log",key="retention.ms"} != -1
+# every topic-level override, whether its Buckety still sets it or not
+buckety_kadm_topic_config{source="topic"}
+```
 
 Suggested alerts. The counters exist at `0` from the first
 reconcile of a topic, so `increase()` catches later changes. The
@@ -562,8 +592,8 @@ spec:
 ```
 
 The counters are per controller process: they restart from zero
-with the Pod, and a deleted `Buckety`'s counter series stay until
-the next restart. The Events and the log line are the exact record
+with the Pod. All `buckety_kadm_*` series of a `Buckety` are
+removed once it is deleted. The Events and the log line are the exact record
 of what changed and from what.
 
 ### Controller won't start

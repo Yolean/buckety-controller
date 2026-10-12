@@ -6,6 +6,25 @@ wait_ready buckety/cfg-mut 120s
 secret_has_keys cfg-mut-topic bootstrap topic
 topic_name="$(secret_value cfg-mut-topic topic)"
 
+# Effective config metrics: the requested retention.ms is a topic
+# override; retention.bytes, which the spec leaves out, is exported
+# with what the broker says it inherits from.
+effective_retention() {
+  controller_metric buckety_kadm_topic_config "namespace=\"$E2E_NAMESPACE\"" 'buckety="cfg-mut"' "key=\"$1\""
+}
+expect_effective() {
+  local key="$1" want="$2" got=""
+  for _ in $(seq 1 30); do
+    got="$(effective_retention "$key")"
+    [[ "$got" =~ $want ]] && return 0
+    sleep 2
+  done
+  fail "buckety_kadm_topic_config for $key: got '$got', want a line matching $want"
+}
+log "checking effective config metrics"
+expect_effective retention.ms 'source="topic".*\} 6\.048e\+08$'
+expect_effective retention.bytes 'source="(broker|default)".*\} '
+
 # Phase 1: patch to a new retention. The impl branch must
 # reconcile this to the broker; this assert checks the broker
 # state via rpk.
@@ -44,6 +63,9 @@ for _ in $(seq 1 12); do
 done
 [[ "$broker_retention" == "3600000" ]] \
   || fail "broker retention.ms=$broker_retention, expected 3600000"
+expect_effective retention.ms 'source="topic".*\} 3\.6e\+06$'
+[[ "$(effective_retention retention.ms | wc -l)" -eq 1 ]] \
+  || fail "more than one retention.ms series: $(effective_retention retention.ms)"
 
 # Immutable-parameter rejection. Patching replicationFactor must
 # fail at the admission webhook.

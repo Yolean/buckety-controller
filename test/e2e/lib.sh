@@ -423,6 +423,24 @@ controller_rollout_wait() {
   done
 }
 
+# controller_metric <name> <label-matcher>...
+# Prints the controller's series of metric <name> whose labels
+# contain every <label-matcher> (e.g. 'buckety="cfg-mut"'), one per
+# line as exposed, scraped through the apiserver's pod proxy from
+# the running controller Pod. No match prints nothing and succeeds,
+# so callers can poll.
+controller_metric() {
+  local name="$1"; shift
+  local pod
+  pod="$(kcg -n "$E2E_CONTROLLER_NS" get pods -l app.kubernetes.io/name=buckety-controller \
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+  kcg get --raw "/api/v1/namespaces/$E2E_CONTROLLER_NS/pods/$pod:8080/proxy/metrics" \
+    | { grep "^$name{" || true; } | { local l m; while IFS= read -r l; do
+        for m in "$@"; do [[ "$l" == *"$m"* ]] || continue 2; done
+        printf '%s\n' "$l"
+      done; }
+}
+
 # controller_config_apply <file>
 # Installs <file> as the controller config Secret and restarts the
 # controller - the operation a platform performs on a config

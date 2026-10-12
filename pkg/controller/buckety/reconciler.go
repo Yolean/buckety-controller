@@ -112,6 +112,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if apierrors.IsNotFound(err) {
 			forgetDrift(req.Namespace, req.Name)
 			r.startup.Forget(req.NamespacedName)
+			// The Buckety's backend is no longer known; ask every
+			// driver to drop what it exports for it.
+			for _, b := range r.Config.Backends {
+				registry.ForgetBuckety(b.Driver, req.Namespace, req.Name)
+			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
